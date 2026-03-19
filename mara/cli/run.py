@@ -21,6 +21,7 @@ Usage examples
 
 import asyncio
 import logging
+import uuid
 from pathlib import Path
 
 import typer
@@ -123,7 +124,26 @@ async def _run(query: str, thread_id: str, output_dir: Path | None = None) -> No
     config = ResearchConfig()
     checkpointer = MemorySaver(serde=JsonPlusSerializer())
     graph = build_graph(checkpointer=checkpointer)
-    run_config = {"configurable": {"thread_id": thread_id}}
+
+    # Build the RunnableConfig, injecting leaf_repo + run_id when enabled.
+    run_id = str(uuid.uuid4())
+    configurable: dict = {"thread_id": thread_id}
+
+    leaf_repo = None
+    if config.leaf_db_enabled:
+        from mara.db import SQLiteLeafRepository
+        leaf_repo = SQLiteLeafRepository(config.leaf_db_path)
+        leaf_repo.create_run(
+            run_id=run_id,
+            query=query,
+            embedding_model=config.embedding_model,
+            hash_algorithm=config.hash_algorithm,
+        )
+        configurable["leaf_repo"] = leaf_repo
+        configurable["run_id"] = run_id
+        _log.info("Leaf DB enabled — run_id=%s, db=%s", run_id, config.leaf_db_path)
+
+    run_config = {"configurable": configurable}
 
     initial_state = {
         "query": query,
@@ -158,6 +178,8 @@ async def _run(query: str, thread_id: str, output_dir: Path | None = None) -> No
     report = result.get("certified_report")
     if report is None:
         typer.echo("Pipeline produced no report.", err=True)
+        if leaf_repo is not None:
+            leaf_repo.close()
         raise typer.Exit(code=1)
 
     _display_report(report)
@@ -165,6 +187,9 @@ async def _run(query: str, thread_id: str, output_dir: Path | None = None) -> No
     if output_dir is not None:
         saved_path = save_report(report, output_dir)
         typer.echo(f"\nReport saved: {saved_path}")
+
+    if leaf_repo is not None:
+        leaf_repo.close()
 
 
 # ---------------------------------------------------------------------------

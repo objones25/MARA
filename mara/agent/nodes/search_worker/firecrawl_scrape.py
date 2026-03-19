@@ -78,10 +78,46 @@ async def firecrawl_scrape(state: SearchWorkerState, config: RunnableConfig) -> 
     _log.debug("Scraping %d unique URL(s) from %d search results", len(urls), len(search_results))
     retrieved_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    fc = Firecrawl(api_key=research_config.firecrawl_api_key)
-    job = await asyncio.to_thread(fc.batch_scrape, urls, formats=["markdown"])
+    # ------------------------------------------------------------------
+    # Freshness cache: skip scraping URLs already in the DB.
+    # This check runs BEFORE the Firecrawl API call to avoid wasting credits.
+    # ------------------------------------------------------------------
+    configurable = config.get("configurable", {}) if config else {}
+    leaf_repo = configurable.get("leaf_repo")
+    sub_query_text = state["sub_query"]["query"]
 
     raw_chunks: list[SourceChunk] = []
+    urls_to_scrape: list[str] = []
+
+    if leaf_repo is not None and research_config.leaf_db_enabled:
+        max_age = research_config.leaf_cache_max_age_hours
+        for url in urls:
+            cached = leaf_repo.get_fresh_leaves_for_url(url, max_age)
+            if cached:
+                _log.debug("Cache hit for %s (%d chunk(s))", url, len(cached))
+                for leaf in cached:
+                    raw_chunks.append(
+                        SourceChunk(
+                            url=leaf["url"],
+                            text=leaf["text"],
+                            retrieved_at=leaf["retrieved_at"],
+                            sub_query=sub_query_text,
+                        )
+                    )
+            else:
+                urls_to_scrape.append(url)
+    else:
+        urls_to_scrape = urls
+
+    if not urls_to_scrape:
+        _log.debug("All %d URL(s) served from cache", len(urls))
+        return {"raw_chunks": raw_chunks}
+
+    _log.debug("Scraping %d URL(s) via Firecrawl (%d served from cache)", len(urls_to_scrape), len(urls) - len(urls_to_scrape))
+
+    fc = Firecrawl(api_key=research_config.firecrawl_api_key)
+    job = await asyncio.to_thread(fc.batch_scrape, urls_to_scrape, formats=["markdown"])
+
     for doc in job.data or []:
         markdown: str = doc.markdown or ""
         url: str = doc.metadata.source_url if doc.metadata else ""
@@ -95,7 +131,7 @@ async def firecrawl_scrape(state: SearchWorkerState, config: RunnableConfig) -> 
                     url=url,
                     text=chunk,
                     retrieved_at=retrieved_at,
-                    sub_query=state["sub_query"]["query"],
+                    sub_query=sub_query_text,
                 )
             )
 

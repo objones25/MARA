@@ -52,16 +52,26 @@ from mara.logging import get_logger
 _log = get_logger(__name__)
 
 
-def build_graph(checkpointer=None):
+def build_graph(checkpointer=None, config_schemas=None):
     """Compile and return the MARA StateGraph.
 
     Args:
         checkpointer: Optional LangGraph checkpointer (e.g. MemorySaver or
             PostgresSaver).  Required for HITL interrupt/resume to work
             correctly across process boundaries.
+        config_schemas: Ignored — present for forward-compatibility with
+            LangGraph's configurable schema API.
 
     Returns:
         A compiled CompiledStateGraph ready for ``invoke`` / ``ainvoke``.
+
+    Leaf DB injection
+    -----------------
+    The ``leaf_repo`` (``SQLiteLeafRepository``) and ``run_id`` (UUID4) are
+    injected via ``RunnableConfig["configurable"]`` by the CLI before each
+    run.  Nodes that need them pull them out of ``config["configurable"]``
+    directly — they are never placed in typed state (non-serialisable objects
+    cannot go into LangGraph state).
     """
     builder: StateGraph = StateGraph(MARAState)
 

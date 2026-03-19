@@ -374,3 +374,88 @@ class TestFirecrawlScrapeChunkPopulation:
         urls = {c["url"] for c in result["raw_chunks"]}
         assert "https://good.com" in urls
         assert "https://bad.com" not in urls
+
+
+# ---------------------------------------------------------------------------
+# firecrawl_scrape — DB cache integration
+# ---------------------------------------------------------------------------
+
+
+class TestFirecrawlScrapeCacheIntegration:
+    """Verify freshness-cache behaviour when leaf_repo is injected."""
+
+    def _make_cached_leaf(self, url: str, text: str = "cached content") -> dict:
+        return {
+            "hash": "abc123",
+            "url": url,
+            "text": text,
+            "retrieved_at": "2026-03-19T10:00:00Z",
+            "contextualized_text": text,
+        }
+
+    async def test_cache_hit_skips_firecrawl(self, mocker):
+        """When leaf_repo returns fresh leaves, batch_scrape must not be called."""
+        mock_fc_cls = mocker.patch(
+            "mara.agent.nodes.search_worker.firecrawl_scrape.Firecrawl"
+        )
+        repo = mocker.MagicMock()
+        repo.get_fresh_leaves_for_url.return_value = [
+            self._make_cached_leaf("https://a.com")
+        ]
+        config = {"configurable": {"leaf_repo": repo}}
+        state = _make_state(search_results=[_make_search_result("https://a.com")])
+        await firecrawl_scrape(state, config)
+        mock_fc_cls.assert_not_called()
+
+    async def test_cache_hit_returns_cached_chunks(self, mocker):
+        mocker.patch("mara.agent.nodes.search_worker.firecrawl_scrape.Firecrawl")
+        repo = mocker.MagicMock()
+        repo.get_fresh_leaves_for_url.return_value = [
+            self._make_cached_leaf("https://a.com", text="cached text here")
+        ]
+        config = {"configurable": {"leaf_repo": repo}}
+        state = _make_state(search_results=[_make_search_result("https://a.com")])
+        result = await firecrawl_scrape(state, config)
+        assert len(result["raw_chunks"]) == 1
+        assert result["raw_chunks"][0]["text"] == "cached text here"
+
+    async def test_cache_miss_falls_through_to_firecrawl(self, mocker):
+        mock_fc = _mock_firecrawl(mocker, [_make_doc("https://a.com", "live content")])
+        repo = mocker.MagicMock()
+        repo.get_fresh_leaves_for_url.return_value = []  # cache miss
+        config = {"configurable": {"leaf_repo": repo}}
+        state = _make_state(search_results=[_make_search_result("https://a.com")])
+        result = await firecrawl_scrape(state, config)
+        mock_fc.batch_scrape.assert_called_once()
+        assert any("live content" in c["text"] for c in result["raw_chunks"])
+
+    async def test_partial_cache_scrapes_only_misses(self, mocker):
+        """URLs with a cache hit are skipped; only misses go to Firecrawl."""
+        mock_fc = _mock_firecrawl(mocker, [_make_doc("https://b.com", "live B")])
+        repo = mocker.MagicMock()
+
+        def _cache(url, max_age):
+            if url == "https://a.com":
+                return [self._make_cached_leaf("https://a.com", "cached A")]
+            return []
+
+        repo.get_fresh_leaves_for_url.side_effect = _cache
+        config = {"configurable": {"leaf_repo": repo}}
+        state = _make_state(search_results=[
+            _make_search_result("https://a.com"),
+            _make_search_result("https://b.com"),
+        ])
+        result = await firecrawl_scrape(state, config)
+        urls_scraped = mock_fc.batch_scrape.call_args.args[0]
+        assert urls_scraped == ["https://b.com"]
+        texts = {c["text"] for c in result["raw_chunks"]}
+        assert "cached A" in texts
+        assert any("live B" in t for t in texts)
+
+    async def test_no_repo_bypasses_cache(self, mocker):
+        """When leaf_repo is absent, all URLs go straight to Firecrawl."""
+        mock_fc = _mock_firecrawl(mocker, [_make_doc("https://a.com", "fresh content")])
+        state = _make_state(search_results=[_make_search_result("https://a.com")])
+        result = await firecrawl_scrape(state, {})
+        mock_fc.batch_scrape.assert_called_once()
+        assert result["raw_chunks"]

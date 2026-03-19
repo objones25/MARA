@@ -33,6 +33,18 @@ from mara.merkle.hasher import hash_chunk
 _log = get_logger(__name__)
 
 
+def _persist_leaves(leaves: list[MerkleLeaf], config: RunnableConfig) -> None:
+    """Upsert leaves and link them to the current run if the DB is enabled."""
+    configurable = config.get("configurable", {}) if config else {}
+    leaf_repo = configurable.get("leaf_repo")
+    run_id = configurable.get("run_id")
+    if leaf_repo is None or run_id is None:
+        return
+    inserted = leaf_repo.upsert_leaves(list(leaves))
+    leaf_repo.link_leaves_to_run(run_id, list(leaves))
+    _log.debug("DB: upserted %d new leaf/leaves, linked %d to run %s", inserted, len(leaves), run_id)
+
+
 def source_hasher(state: MARAState, config: RunnableConfig) -> dict:
     """Hash each raw SourceChunk and return the ordered MerkleLeaf list.
 
@@ -69,4 +81,5 @@ def source_hasher(state: MARAState, config: RunnableConfig) -> dict:
             )
         )
 
+    _persist_leaves(leaves, config)
     return {"merkle_leaves": leaves}

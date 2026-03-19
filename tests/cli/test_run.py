@@ -462,3 +462,53 @@ class TestRunAsyncSave:
         with pytest.raises(_typer.Exit):
             await _run("q", "t-1", output_dir=tmp_path if False else None)
         mock_save.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# _run (async) — leaf_db_enabled=False paths (covers 133->146, 181->183, 191->exit)
+# ---------------------------------------------------------------------------
+
+
+class TestRunAsyncDbDisabled:
+    """Exercises _run with leaf_db_enabled=False so leaf_repo stays None.
+
+    Covers three branch misses that only occur when the DB is disabled:
+      - 133->146  (False branch of `if config.leaf_db_enabled`)
+      - 181->183  (False branch of `if leaf_repo is not None` in the error path)
+      - 191->exit (False branch of `if leaf_repo is not None` in the success path)
+    """
+
+    def _mock_graph(self, mocker, result: dict):
+        mock_graph = mocker.MagicMock()
+        mock_graph.ainvoke = mocker.AsyncMock(return_value=result)
+        mocker.patch("mara.cli.run.build_graph", return_value=mock_graph)
+        mocker.patch("mara.cli.run.MemorySaver")
+        return mock_graph
+
+    async def test_success_with_db_disabled(self, mocker, monkeypatch):
+        """leaf_db_enabled=False → leaf_repo stays None → 191->exit branch taken."""
+        monkeypatch.setenv("MARA_LEAF_DB_ENABLED", "false")
+        report = _make_report()
+        self._mock_graph(mocker, {"certified_report": report})
+        mock_display = mocker.patch("mara.cli.run._display_report")
+        await _run("q", "t-1")
+        mock_display.assert_called_once_with(report)
+
+    async def test_no_report_with_db_disabled(self, mocker, monkeypatch):
+        """leaf_db_enabled=False + no report → leaf_repo is None → 181->183 branch taken."""
+        monkeypatch.setenv("MARA_LEAF_DB_ENABLED", "false")
+        self._mock_graph(mocker, {"certified_report": None})
+        import typer as _typer
+        with pytest.raises(_typer.Exit) as exc_info:
+            await _run("q", "t-1")
+        assert exc_info.value.exit_code == 1
+
+    async def test_db_not_initialised_when_disabled(self, mocker, monkeypatch):
+        """SQLiteLeafRepository must not be imported/constructed when DB is disabled."""
+        monkeypatch.setenv("MARA_LEAF_DB_ENABLED", "false")
+        mock_repo_cls = mocker.patch("mara.cli.run.SQLiteLeafRepository", create=True)
+        report = _make_report()
+        self._mock_graph(mocker, {"certified_report": report})
+        mocker.patch("mara.cli.run._display_report")
+        await _run("q", "t-1")
+        mock_repo_cls.assert_not_called()

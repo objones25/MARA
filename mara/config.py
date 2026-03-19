@@ -71,6 +71,11 @@ class ResearchConfig(BaseSettings):
     checkpointer: str = Field(default="memory", pattern="^(memory|postgres)$")
     postgres_dsn: str = ""
 
+    # Leaf database
+    leaf_db_path: str = Field(default="~/.mara/leaves.db", description="Path to the SQLite leaf database. Tilde-expanded at open time.")
+    leaf_cache_max_age_hours: float = Field(default=168.0, gt=0.0, description="How long a scraped URL's leaves are considered fresh (default: 7 days).")
+    leaf_db_enabled: bool = Field(default=True, description="Set to False to disable all DB reads/writes (useful in tests and CI).")
+
     @model_validator(mode="after")
     def claim_sources_le_candidates(self) -> "ResearchConfig":
         if self.max_claim_sources > self.max_retrieval_candidates:

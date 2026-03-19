@@ -59,4 +59,13 @@ def certified_output(state: MARAState, config: RunnableConfig) -> dict:
         len(report.leaves),
         len(report.scored_claims),
     )
+
+    # Persist run completion to the leaf DB if enabled.
+    configurable = config.get("configurable", {}) if config else {}
+    leaf_repo = configurable.get("leaf_repo")
+    run_id = configurable.get("run_id")
+    if leaf_repo is not None and run_id is not None:
+        leaf_repo.complete_run(run_id, merkle_root)
+        _log.debug("DB: run %s marked complete (root=%s…)", run_id, merkle_root[:12] if merkle_root else "")
+
     return {"certified_report": report}

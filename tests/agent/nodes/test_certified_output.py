@@ -179,3 +179,32 @@ class TestClaimsHandling:
         scored = [_SC("c", 0.9, [])]
         result = certified_output(_make_state(scored=scored), config={})
         assert result["certified_report"].scored_claims is not scored
+
+
+class TestCertifiedOutputDbIntegration:
+    """Verify that certified_output calls leaf_repo.complete_run when injected."""
+
+    def test_complete_run_called_when_repo_and_run_id_injected(self, mocker):
+        repo = mocker.MagicMock()
+        config = {"configurable": {"leaf_repo": repo, "run_id": "run-42"}}
+        certified_output(_make_state(), config=config)
+        repo.complete_run.assert_called_once()
+
+    def test_complete_run_called_with_run_id(self, mocker):
+        repo = mocker.MagicMock()
+        config = {"configurable": {"leaf_repo": repo, "run_id": "run-abc"}}
+        certified_output(_make_state(), config=config)
+        call_args = repo.complete_run.call_args.args
+        assert call_args[0] == "run-abc"
+
+    def test_complete_run_not_called_when_repo_missing(self, mocker):
+        repo = mocker.MagicMock()
+        config = {"configurable": {"run_id": "run-1"}}
+        certified_output(_make_state(), config=config)
+        repo.complete_run.assert_not_called()
+
+    def test_complete_run_not_called_when_run_id_missing(self, mocker):
+        repo = mocker.MagicMock()
+        config = {"configurable": {"leaf_repo": repo}}
+        certified_output(_make_state(), config=config)
+        repo.complete_run.assert_not_called()

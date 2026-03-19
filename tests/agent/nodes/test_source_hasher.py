@@ -176,3 +176,40 @@ class TestContextualizedText:
         result = source_hasher(_make_state(chunks), config={})
         for leaf in result["merkle_leaves"]:
             assert "contextualized_text" in leaf
+
+
+class TestSourceHasherDbIntegration:
+    """Verify that source_hasher calls leaf_repo when repo + run_id are injected."""
+
+    def test_upsert_and_link_called_when_repo_injected(self, mocker):
+        repo = mocker.MagicMock()
+        repo.upsert_leaves.return_value = 1
+        chunk = _make_chunk()
+        config = {"configurable": {"leaf_repo": repo, "run_id": "run-1"}}
+        source_hasher(_make_state([chunk]), config=config)
+        repo.upsert_leaves.assert_called_once()
+        repo.link_leaves_to_run.assert_called_once()
+
+    def test_link_called_with_run_id(self, mocker):
+        repo = mocker.MagicMock()
+        repo.upsert_leaves.return_value = 1
+        chunk = _make_chunk()
+        config = {"configurable": {"leaf_repo": repo, "run_id": "my-run-id"}}
+        source_hasher(_make_state([chunk]), config=config)
+        run_id_passed = repo.link_leaves_to_run.call_args.args[0]
+        assert run_id_passed == "my-run-id"
+
+    def test_no_db_calls_when_repo_missing(self, mocker):
+        repo = mocker.MagicMock()
+        chunk = _make_chunk()
+        # No leaf_repo in configurable
+        config = {"configurable": {"run_id": "run-1"}}
+        source_hasher(_make_state([chunk]), config=config)
+        repo.upsert_leaves.assert_not_called()
+
+    def test_no_db_calls_when_run_id_missing(self, mocker):
+        repo = mocker.MagicMock()
+        chunk = _make_chunk()
+        config = {"configurable": {"leaf_repo": repo}}
+        source_hasher(_make_state([chunk]), config=config)
+        repo.upsert_leaves.assert_not_called()
