@@ -29,7 +29,10 @@ from langchain_anthropic import ChatAnthropic
 from langchain_core.runnables import RunnableConfig
 
 from mara.agent.state import MARAState, SubQuery
+from mara.logging import get_logger
 from mara.prompts.query_planner import SYSTEM_PROMPT, build_user_message
+
+_log = get_logger(__name__)
 
 
 def _make_llm(model: str, api_key: str) -> ChatAnthropic:
@@ -96,6 +99,8 @@ async def query_planner(state: MARAState, config: RunnableConfig) -> dict:
     research_config = state["config"]
     n = research_config.max_workers
 
+    _log.info("Planning query into %d sub-queries: %r", n, state["query"])
+
     llm = _make_llm(research_config.model, research_config.anthropic_api_key)
 
     messages = [
@@ -103,6 +108,14 @@ async def query_planner(state: MARAState, config: RunnableConfig) -> dict:
         {"role": "user", "content": build_user_message(state["query"], n)},
     ]
 
-    response = await llm.ainvoke(messages)
+    response = await llm.ainvoke(messages, config)
     sub_queries = _parse_sub_queries(response.content, n)
+
+    if len(sub_queries) < n:
+        _log.warning(
+            "LLM produced %d sub-queries, expected %d", len(sub_queries), n
+        )
+    else:
+        _log.info("Generated %d sub-queries", len(sub_queries))
+
     return {"sub_queries": sub_queries}

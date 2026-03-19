@@ -29,7 +29,10 @@ from langchain_core.runnables import RunnableConfig
 from mara.agent.state import MARAState
 from mara.confidence.scorer import score_claim
 from mara.confidence.signals import LSAVerdict
+from mara.logging import get_logger
 from mara.prompts.lsa_scorer import SYSTEM_PROMPT, build_user_message
+
+_log = get_logger(__name__)
 
 
 def _make_llm(model: str, api_key: str) -> ChatAnthropic:
@@ -37,7 +40,12 @@ def _make_llm(model: str, api_key: str) -> ChatAnthropic:
     return ChatAnthropic(model=model, api_key=api_key, max_tokens=32)
 
 
-def _call_lsa(llm: ChatAnthropic, claim_text: str, source_texts: list[str]) -> LSAVerdict:
+def _call_lsa(
+    llm: ChatAnthropic,
+    claim_text: str,
+    source_texts: list[str],
+    config: RunnableConfig | None = None,
+) -> LSAVerdict:
     """Call Claude synchronously and return an LSAVerdict.
 
     The response is stripped and normalised to one of the three accepted
@@ -57,7 +65,7 @@ def _call_lsa(llm: ChatAnthropic, claim_text: str, source_texts: list[str]) -> L
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": build_user_message(claim_text, source_texts)},
     ]
-    response = llm.invoke(messages)
+    response = llm.invoke(messages, config)
     verdict = response.content.strip().lower()
     if verdict in ("supported", "partially_supported", "unsupported"):
         return verdict  # type: ignore[return-value]
@@ -79,10 +87,12 @@ async def confidence_scorer(state: MARAState, config: RunnableConfig) -> dict:
     leaves = state["merkle_leaves"]
     claims = state["extracted_claims"]
 
+    _log.info("Scoring %d claims against %d leaves", len(claims), len(leaves))
+
     llm = _make_llm(research_config.model, research_config.anthropic_api_key)
 
     def lsa_callable(claim_text: str, source_texts: list[str]) -> LSAVerdict:
-        return _call_lsa(llm, claim_text, source_texts)
+        return _call_lsa(llm, claim_text, source_texts, config)
 
     scored = []
     for claim in claims:
@@ -97,4 +107,5 @@ async def confidence_scorer(state: MARAState, config: RunnableConfig) -> dict:
         )
         scored.append(result)
 
+    _log.info("Scored %d claims", len(scored))
     return {"scored_claims": scored}

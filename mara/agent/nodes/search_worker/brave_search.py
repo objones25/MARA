@@ -37,6 +37,9 @@ import httpx
 from langchain_core.runnables import RunnableConfig
 
 from mara.agent.state import SearchResult, SearchWorkerState
+from mara.logging import get_logger
+
+_log = get_logger(__name__)
 
 _BRAVE_SEARCH_URL = "https://api.search.brave.com/res/v1/web/search"
 
@@ -142,6 +145,9 @@ async def brave_search(state: SearchWorkerState, config: RunnableConfig) -> dict
     """
     research_config = state["research_config"]
     count = min(20, research_config.max_sources)
+    query = state["sub_query"]["query"]
+
+    _log.debug("Brave search: %r (count=%d)", query, count)
 
     params: dict[str, str | int] = {
         "q": state["sub_query"]["query"],
@@ -171,4 +177,5 @@ async def brave_search(state: SearchWorkerState, config: RunnableConfig) -> dict
     results.extend(_discussion_results(data.get("discussions", {}).get("results", [])))
     results.extend(_faq_results(data.get("faq", {}).get("results", [])))
 
+    _log.debug("Brave returned %d results for %r", len(results), query)
     return {"search_results": results}

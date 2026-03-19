@@ -22,6 +22,9 @@ from firecrawl import Firecrawl
 from langchain_core.runnables import RunnableConfig
 
 from mara.agent.state import SourceChunk, SearchWorkerState
+from mara.logging import get_logger
+
+_log = get_logger(__name__)
 
 
 def _chunk_text(text: str, chunk_size: int, overlap: int) -> list[str]:
@@ -62,6 +65,7 @@ async def firecrawl_scrape(state: SearchWorkerState, config: RunnableConfig) -> 
     search_results = state["search_results"]
 
     if not search_results:
+        _log.debug("No search results — skipping scrape")
         return {"raw_chunks": []}
 
     # Deduplicate URLs before scraping — the same URL may appear in multiple
@@ -71,6 +75,7 @@ async def firecrawl_scrape(state: SearchWorkerState, config: RunnableConfig) -> 
     # sub-query workers) is a future concern; a shared in-memory cache with a
     # threading.Lock would handle it, but is deferred until benchmarked.
     urls = list(dict.fromkeys(r["url"] for r in search_results))
+    _log.debug("Scraping %d unique URL(s) from %d search results", len(urls), len(search_results))
     retrieved_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     fc = Firecrawl(api_key=research_config.firecrawl_api_key)
@@ -94,4 +99,5 @@ async def firecrawl_scrape(state: SearchWorkerState, config: RunnableConfig) -> 
                 )
             )
 
+    _log.debug("Produced %d chunk(s) from %d URL(s)", len(raw_chunks), len(urls))
     return {"raw_chunks": raw_chunks}

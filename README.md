@@ -28,6 +28,7 @@
   - [The Merkle Integrity Protocol](#the-merkle-integrity-protocol)
   - [Retrieval Strategy](#retrieval-strategy)
     - [Current approach](#current-approach)
+    - [Why Brave search results are not hashed](#why-brave-search-results-are-not-hashed)
     - [The chunking constraint](#the-chunking-constraint)
     - [Planned: local corpus retrieval](#planned-local-corpus-retrieval)
     - [Retrieval experimentation](#retrieval-experimentation)
@@ -441,7 +442,7 @@ Separating search and scraping into distinct nodes means their failure modes, re
 
 Brave results — titles, descriptions, `extra_snippets`, `page_age`, `result_type` — flow into `MARAState.search_results` and are available to every downstream node, but they are **never committed to the Merkle tree**. This is a hard requirement of the integrity protocol, not an oversight.
 
-The Merkle integrity guarantee is: *"at any future time, you can recompute `SHA-256(canonical_serialise(url, text, retrieved_at))` and verify the hash matches."* That guarantee requires the hashed bytes to be **reproducible from first principles** — meaning you fetch the source URL yourself and chunk the raw text yourself. Brave's metadata fails this test on two counts:
+The Merkle integrity guarantee is: _"at any future time, you can recompute `SHA-256(canonical_serialise(url, text, retrieved_at))` and verify the hash matches."_ That guarantee requires the hashed bytes to be **reproducible from first principles** — meaning you fetch the source URL yourself and chunk the raw text yourself. Brave's metadata fails this test on two counts:
 
 1. **Provider-controlled, not reproducible.** Brave's snippets and titles are Brave's own extractions of the page. Brave re-crawls, updates its extraction logic, and changes its ranking signals continuously. The same URL queried tomorrow returns different `extra_snippets` and potentially a different `description`. A hash of Brave's output would produce false verification failures — not because anything was tampered with, but because the provider changed its summary.
 
@@ -569,6 +570,69 @@ Every node in the MARA graph is automatically traced by LangSmith when the `LANG
 - **Tool call traces:** Every search API call, Firecrawl scrape, and hash computation.
 - **Routing decisions:** Which branch of a conditional edge was taken, and what state triggered it.
 - **Human-in-the-loop events:** The exact payload sent to the human reviewer and the decision returned.
+
+### Nested LLM traces via config forwarding
+
+LangGraph injects metadata into the `config: RunnableConfig` it passes to every node at runtime:
+
+```python
+config["metadata"]["langgraph_node"]      # e.g. "query_planner"
+config["metadata"]["langgraph_step"]      # execution step number
+config["metadata"]["langgraph_triggers"]  # what triggered this node
+config["metadata"]["langgraph_checkpoint_ns"]
+```
+
+Every node that makes an LLM call forwards this `config` to `ainvoke` / `invoke`:
+
+```python
+# query_planner — LangSmith nests this span under "query_planner" step
+response = await llm.ainvoke(messages, config)
+
+# confidence_scorer — each LSA call is nested under "confidence_scorer" step
+response = llm.invoke(messages, config)
+```
+
+This produces a clean tree in LangSmith: graph run → node → LLM call, with step numbers and node names surfaced on every span. Tags and metadata passed at graph-invocation time propagate automatically to all child spans.
+
+### Tags and metadata at invocation time
+
+Pass `tags` and `metadata` in the top-level `config` dict when invoking the graph. They are inherited by every node and every LLM call inside the run:
+
+```python
+graph.invoke(
+    {"query": "...", "config": research_config},
+    config={
+        "tags": ["production", "v0.1.0"],
+        "metadata": {
+            "user_id": "user-123",
+            "session_id": "sess-456",
+            "environment": "production",
+        },
+        "run_name": "mara-research-run",
+    },
+)
+```
+
+### Python logger (`mara.logging`)
+
+LangSmith traces all LLM calls. For the non-LLM parts of the pipeline — chunking, hashing, tree construction — MARA uses a standard Python logger hierarchy rooted at `mara`:
+
+```python
+# In any mara module:
+from mara.logging import get_logger
+_log = get_logger(__name__)  # → e.g. "mara.agent.nodes.source_hasher"
+
+_log.info("Hashing %d chunks with %s", n, algorithm)
+```
+
+Configure the root logger at application startup to control verbosity for the entire pipeline:
+
+```python
+import logging
+logging.getLogger("mara").setLevel(logging.DEBUG)
+```
+
+The `mara.*` hierarchy is separate from LangSmith — it covers business-logic events like node entry/exit counts, degraded-but-non-fatal conditions (e.g. LLM under-produced sub-queries), and non-LLM node completions that don't appear in LangSmith traces at all.
 
 ### Custom evaluators
 
@@ -732,6 +796,7 @@ mara/
 ├── api/                      # Planned — thin FastAPI adapter over the same agent core
 │   └── routes.py             #   ResearchConfig (request body) → agent → CertifiedReport (response)
 ├── config.py                 # ResearchConfig (BaseSettings) — loads .env, validates all config
+├── logging.py                # get_logger() factory — mara.* logger hierarchy
 └── prompts/
     ├── query_planner.py
     ├── claim_extractor.py

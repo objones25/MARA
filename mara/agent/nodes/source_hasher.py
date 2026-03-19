@@ -27,7 +27,10 @@ Why is the index field set here?
 from langchain_core.runnables import RunnableConfig
 
 from mara.agent.state import MARAState, MerkleLeaf
+from mara.logging import get_logger
 from mara.merkle.hasher import hash_chunk
+
+_log = get_logger(__name__)
 
 
 def source_hasher(state: MARAState, config: RunnableConfig) -> dict:
@@ -42,6 +45,9 @@ def source_hasher(state: MARAState, config: RunnableConfig) -> dict:
         ``{"merkle_leaves": list[MerkleLeaf]}``
     """
     algorithm = state["config"].hash_algorithm
+    n = len(state["raw_chunks"])
+    _log.info("Hashing %d chunk(s) with %s", n, algorithm)
+
     leaves: list[MerkleLeaf] = []
 
     for i, chunk in enumerate(state["raw_chunks"]):
