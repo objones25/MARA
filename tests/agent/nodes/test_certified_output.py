@@ -129,15 +129,29 @@ class TestCertifiedOutputFields:
 
 
 class TestMerkleRoot:
-    def test_merkle_root_from_tree(self):
-        leaves = [_make_leaf(0)]
-        tree = build_merkle_tree([leaves[0]["hash"]], "sha256")
-        result = certified_output(_make_state(leaves=leaves, tree=tree), config={})
-        assert result["certified_report"].merkle_root == tree.root
+    def test_merkle_root_from_retrieved_leaves(self):
+        leaves = [_make_leaf(0), _make_leaf(1)]
+        expected_root = build_merkle_tree([l["hash"] for l in leaves], "sha256").root
+        result = certified_output(_make_state(retrieved=leaves), config={})
+        assert result["certified_report"].merkle_root == expected_root
 
-    def test_empty_tree_root_is_empty_string(self):
-        result = certified_output(_make_state(tree=None), config={})
+    def test_merkle_root_independent_of_full_corpus_tree(self):
+        # The corpus tree (merkle_tree in state) is ignored; only retrieved leaves matter.
+        retrieved = [_make_leaf(0)]
+        all_leaves = [_make_leaf(0), _make_leaf(1), _make_leaf(2)]
+        corpus_tree = build_merkle_tree([l["hash"] for l in all_leaves], "sha256")
+        result = certified_output(_make_state(leaves=all_leaves, retrieved=retrieved, tree=corpus_tree), config={})
+        expected_root = build_merkle_tree([retrieved[0]["hash"]], "sha256").root
+        assert result["certified_report"].merkle_root == expected_root
+        assert result["certified_report"].merkle_root != corpus_tree.root
+
+    def test_empty_retrieved_leaves_root_is_empty_string(self):
+        result = certified_output(_make_state(retrieved=[]), config={})
         assert result["certified_report"].merkle_root == ""
+
+    def test_hash_algorithm_stored_in_report(self):
+        result = certified_output(_make_state(), config={})
+        assert result["certified_report"].hash_algorithm == "sha256"
 
 
 class TestClaimsHandling:

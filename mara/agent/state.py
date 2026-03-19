@@ -172,6 +172,7 @@ class CertifiedReport:
     merkle_root: str
     leaves: list  # list[MerkleLeaf] — avoid forward-ref cycle with TypedDict
     scored_claims: list  # list[ScoredClaim] — dataclass from confidence.scorer
+    hash_algorithm: str = field(default="sha256")
     generated_at: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )

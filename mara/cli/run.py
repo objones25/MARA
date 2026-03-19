@@ -21,15 +21,19 @@ Usage examples
 
 import asyncio
 import logging
+from pathlib import Path
 
 import typer
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.types import Command
 
 from mara.agent.graph import build_graph
 from mara.agent.state import CertifiedReport
 from mara.config import ResearchConfig
 from mara.logging import get_logger
+from mara.report_store import DEFAULT_REPORT_DIR, load_report, save_report
+from mara.verifier import VerificationResult, verify_report
 
 _log = get_logger(__name__)
 
@@ -114,10 +118,10 @@ def _display_report(report: CertifiedReport) -> None:
     typer.echo(f"Generated at: {report.generated_at}")
 
 
-async def _run(query: str, thread_id: str) -> None:
+async def _run(query: str, thread_id: str, output_dir: Path | None = None) -> None:
     """Core async pipeline runner.  Called by the ``run`` CLI command."""
     config = ResearchConfig()
-    checkpointer = MemorySaver()
+    checkpointer = MemorySaver(serde=JsonPlusSerializer())
     graph = build_graph(checkpointer=checkpointer)
     run_config = {"configurable": {"thread_id": thread_id}}
 
@@ -158,6 +162,10 @@ async def _run(query: str, thread_id: str) -> None:
 
     _display_report(report)
 
+    if output_dir is not None:
+        saved_path = save_report(report, output_dir)
+        typer.echo(f"\nReport saved: {saved_path}")
+
 
 # ---------------------------------------------------------------------------
 # Commands
@@ -171,10 +179,16 @@ def run(
         "mara-1", "--thread-id", "-t", help="Checkpointer thread ID."
     ),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable debug logging."),
+    output_dir: Path = typer.Option(
+        DEFAULT_REPORT_DIR,
+        "--output-dir",
+        "-o",
+        help="Directory to save the CertifiedReport JSON.",
+    ),
 ) -> None:
     """Run the MARA research pipeline for QUERY."""
     _setup_logging(verbose)
-    asyncio.run(_run(query, thread_id))
+    asyncio.run(_run(query, thread_id, output_dir))
 
 
 @app.command()
@@ -196,6 +210,54 @@ def info() -> None:
     for name in sorted(graph.nodes.keys()):
         if not name.startswith("__"):
             typer.echo(f"  {name}")
+
+
+@app.command()
+def verify(
+    report_path: Path = typer.Argument(..., help="Path to a saved CertifiedReport JSON."),
+) -> None:
+    """Verify the cryptographic integrity of a saved CertifiedReport."""
+    if not report_path.exists():
+        typer.echo(f"Report not found: {report_path}", err=True)
+        raise typer.Exit(code=1)
+
+    report = load_report(report_path)
+    result = verify_report(report)
+    _display_verification(result)
+
+    if not result.passed:
+        raise typer.Exit(code=1)
+
+
+def _display_verification(result: VerificationResult) -> None:
+    """Render a VerificationResult to the terminal."""
+    typer.echo(f"\n{'=' * 60}")
+    typer.echo("MARA INTEGRITY VERIFICATION")
+    typer.echo(f"{'=' * 60}\n")
+    typer.echo(f"Query: {result.report_query}\n")
+
+    for lr in result.leaf_results:
+        mark = "OK" if lr.match else "FAIL"
+        typer.echo(f"  [{mark}] leaf {lr.index}: {lr.url}")
+        if not lr.match:
+            typer.echo(f"         expected: {lr.expected_hash}")
+            typer.echo(f"         computed: {lr.computed_hash}")
+
+    typer.echo()
+    total = len(result.leaf_results)
+    passed_count = sum(1 for r in result.leaf_results if r.match)
+    typer.echo(f"Leaves: {passed_count}/{total} verified")
+
+    typer.echo()
+    if result.root_match:
+        typer.echo(f"Merkle root:  {result.merkle_root_expected[:16]}…  OK")
+    else:
+        typer.echo("Merkle root:  MISMATCH")
+        typer.echo(f"  expected: {result.merkle_root_expected}")
+        typer.echo(f"  computed: {result.merkle_root_computed}")
+
+    typer.echo()
+    typer.echo(f"Integrity: {'PASS' if result.passed else 'FAIL'}")
 
 
 if __name__ == "__main__":  # pragma: no cover

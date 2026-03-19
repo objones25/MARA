@@ -18,6 +18,7 @@ from langchain_core.runnables import RunnableConfig
 
 from mara.agent.state import CertifiedReport, MARAState
 from mara.logging import get_logger
+from mara.merkle.tree import build_merkle_tree
 
 _log = get_logger(__name__)
 
@@ -32,8 +33,14 @@ def certified_output(state: MARAState, config: RunnableConfig) -> dict:
     Returns:
         ``{"certified_report": CertifiedReport}``
     """
-    tree = state["merkle_tree"]
-    merkle_root = tree.root if tree else ""
+    algorithm = state["config"].hash_algorithm
+    retrieved = list(state["retrieved_leaves"])
+
+    if retrieved:
+        leaf_hashes = [leaf["hash"] for leaf in retrieved]
+        merkle_root = build_merkle_tree(leaf_hashes, algorithm).root
+    else:
+        merkle_root = ""
 
     approved_claims = state["human_approved_claims"] or state["scored_claims"]
 
@@ -41,8 +48,9 @@ def certified_output(state: MARAState, config: RunnableConfig) -> dict:
         query=state["query"],
         report_text=state["report_draft"],
         merkle_root=merkle_root,
-        leaves=list(state["retrieved_leaves"]),
+        leaves=retrieved,
         scored_claims=list(approved_claims),
+        hash_algorithm=algorithm,
     )
 
     _log.info(

@@ -234,7 +234,7 @@ class TestRunCommand:
     def test_run_passes_query(self, mocker):
         captured = []
 
-        async def fake_run(query, thread_id):
+        async def fake_run(query, thread_id, output_dir=None):
             captured.append(query)
 
         mocker.patch("mara.cli.run._run", side_effect=fake_run)
@@ -248,7 +248,7 @@ class TestRunCommand:
     def test_run_passes_thread_id(self, mocker):
         captured = []
 
-        async def fake_run(query, thread_id):
+        async def fake_run(query, thread_id, output_dir=None):
             captured.append(thread_id)
 
         mocker.patch("mara.cli.run._run", side_effect=fake_run)
@@ -274,7 +274,7 @@ class TestRunCommand:
     def test_default_thread_id_is_mara_1(self, mocker):
         captured = []
 
-        async def fake_run(query, thread_id):
+        async def fake_run(query, thread_id, output_dir=None):
             captured.append(thread_id)
 
         mocker.patch("mara.cli.run._run", side_effect=fake_run)
@@ -413,3 +413,52 @@ class TestRunAsyncHitl:
 
         await _run("q", "t-1")
         assert mock_graph.ainvoke.call_count == 3
+
+
+# ---------------------------------------------------------------------------
+# _run (async) — save behaviour
+# ---------------------------------------------------------------------------
+
+
+class TestRunAsyncSave:
+    def _mock_graph(self, mocker, report):
+        mock_graph = mocker.MagicMock()
+        mock_graph.ainvoke = mocker.AsyncMock(return_value={"certified_report": report})
+        mocker.patch("mara.cli.run.build_graph", return_value=mock_graph)
+        mocker.patch("mara.cli.run.MemorySaver")
+        return mock_graph
+
+    async def test_save_report_called_when_output_dir_provided(self, mocker, tmp_path):
+        report = _make_report()
+        self._mock_graph(mocker, report)
+        mocker.patch("mara.cli.run._display_report")
+        mock_save = mocker.patch("mara.cli.run.save_report", return_value=tmp_path / "r.json")
+        await _run("q", "t-1", output_dir=tmp_path)
+        mock_save.assert_called_once_with(report, tmp_path)
+
+    async def test_save_report_not_called_when_output_dir_is_none(self, mocker):
+        report = _make_report()
+        self._mock_graph(mocker, report)
+        mocker.patch("mara.cli.run._display_report")
+        mock_save = mocker.patch("mara.cli.run.save_report")
+        await _run("q", "t-1", output_dir=None)
+        mock_save.assert_not_called()
+
+    async def test_saved_path_echoed(self, mocker, tmp_path):
+        report = _make_report()
+        self._mock_graph(mocker, report)
+        mocker.patch("mara.cli.run._display_report")
+        saved = tmp_path / "my_report.json"
+        mocker.patch("mara.cli.run.save_report", return_value=saved)
+        mock_echo = mocker.patch("mara.cli.run.typer.echo")
+        await _run("q", "t-1", output_dir=tmp_path)
+        output = " ".join(str(c) for c in mock_echo.call_args_list)
+        assert str(saved) in output
+
+    async def test_save_not_called_when_no_report(self, mocker):
+        self._mock_graph(mocker, None)
+        mock_save = mocker.patch("mara.cli.run.save_report")
+        import typer as _typer
+        with pytest.raises(_typer.Exit):
+            await _run("q", "t-1", output_dir=tmp_path if False else None)
+        mock_save.assert_not_called()

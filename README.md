@@ -19,17 +19,19 @@
     - [4. Merkle Integrity Layer](#4-merkle-integrity-layer)
       - [How the Merkle tree is built](#how-the-merkle-tree-is-built)
       - [Why a Merkle tree instead of a flat list of hashes?](#why-a-merkle-tree-instead-of-a-flat-list-of-hashes)
-    - [5. Confidence Scorer](#5-confidence-scorer)
+    - [5. Semantic Retriever](#5-semantic-retriever)
+    - [6. Confidence Scorer](#6-confidence-scorer)
       - [The scoring model](#the-scoring-model)
       - [Routing based on confidence](#routing-based-on-confidence)
-    - [6. HITL Checkpoint](#6-hitl-checkpoint)
-    - [7. Report Synthesizer](#7-report-synthesizer)
-    - [8. Certified Output](#8-certified-output)
+    - [7. HITL Checkpoint](#7-hitl-checkpoint)
+    - [8. Report Synthesizer](#8-report-synthesizer)
+    - [9. Certified Output](#9-certified-output)
   - [The Merkle Integrity Protocol](#the-merkle-integrity-protocol)
   - [Retrieval Strategy](#retrieval-strategy)
     - [Current approach](#current-approach)
     - [Why Brave search results are not hashed](#why-brave-search-results-are-not-hashed)
     - [The chunking constraint](#the-chunking-constraint)
+    - [Semantic retrieval over the scraped corpus](#semantic-retrieval-over-the-scraped-corpus)
     - [Planned: local corpus retrieval](#planned-local-corpus-retrieval)
     - [Retrieval experimentation](#retrieval-experimentation)
   - [Statistical Confidence Scoring](#statistical-confidence-scoring)
@@ -100,7 +102,7 @@ Current mitigations — RAG, chain-of-thought, temperature reduction — reduce 
 
 ## Architecture
 
-The agent is implemented as a directed `StateGraph` in LangGraph. Control flows through eight nodes, some of which fan out into parallel subgraphs using the `Send` API. The Merkle integrity layer is a data structure — not a separate node — that is built incrementally as sources are hashed and committed into the agent state.
+The agent is implemented as a directed `StateGraph` in LangGraph. Control flows through ten nodes, some of which fan out into parallel subgraphs using the `Send` API. The Merkle integrity layer is a data structure — not a separate node — that is built incrementally as sources are hashed and committed into the agent state.
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -110,26 +112,29 @@ The agent is implemented as a directed `StateGraph` in LangGraph. Control flows 
 │       │                                                 │
 │       ▼                                                 │
 │  [Search Workers ×N] ◄── parallel fan-out via Send()   │
-│       │                                                 │
+│       │  (brave_search → firecrawl_scrape per worker)  │
 │       ▼                                                 │
-│  [Source Hasher] ──────────────► [Merkle Tree Builder] │
-│       │                                   │            │
-│       ▼                                   │            │
-│  [Confidence Scorer] ◄────────── validates│            │
-│       │                                               │
-│    ┌──┴──────────────────┬──────────────────┐         │
-│    │                     │                  │         │
-│ conf ≥ 0.80        0.55–0.80           conf < 0.55    │
-│    │                     │                  │         │
-│    │            [Corrective RAG]    [HITL Checkpoint] │
-│    │             re-fetch + re-score    approve/      │
-│    │                     │             reject/retry   │
-│    │                     │                  │         │
-│    └─────────────────────┴──────────────────┘         │
-│                          ▼                             │
-│                 [Report Synthesizer]                   │
-│                          │                             │
-│                 [Certified Output] ◄── Merkle root ───┘
+│  [Source Hasher]  →  [Merkle Builder]                  │
+│                            │                            │
+│                            ▼                            │
+│                    [Retriever]                          │
+│                     cosine sim → top-K leaves           │
+│                            │                            │
+│                            ▼                            │
+│                   [Claim Extractor]                     │
+│                            │                            │
+│                            ▼                            │
+│                  [Confidence Scorer]                    │
+│                            │                            │
+│                            ▼                            │
+│                  [HITL Checkpoint]                      │
+│                   auto-approve high conf;               │
+│                   interrupt() for low conf              │
+│                            │                            │
+│                            ▼                            │
+│                 [Report Synthesizer]                    │
+│                            │                            │
+│                 [Certified Output] ◄── Merkle root      │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -147,7 +152,7 @@ LangSmith traces every node invocation, every LLM call, and every routing decisi
 
 **Implementation note:** The planner uses a structured output schema (a list of `SubQuery` objects, each with a `query` string and a `domain` hint). The structured output is enforced using LangChain's `.with_structured_output()` on the LLM call, ensuring the downstream `Send()` fan-out always receives well-formed payloads.
 
-**LangGraph pattern used:** This is a standard single node with a conditional edge that either proceeds to the search fan-out or, if the query is judged to be unanswerable (e.g., a real-time data request), exits early with an explanation.
+**LangGraph pattern used:** A single node with a conditional edge that fans out to parallel search workers via the `Send` API.
 
 ---
 
@@ -165,14 +170,19 @@ A third retrieval strategy — citation graph traversal via Firecrawl's crawl en
 **LangGraph pattern used — the `Send` API:** LangGraph's `Send` API enables fan-out by dispatching one `Send` object per sub-query. The parent graph waits for all workers to finish before proceeding.
 
 ```python
-# Fan-out: one Send per sub-query
-def dispatch_search_workers(state: MARState):
+# agent/edges/routing.py
+def dispatch_search_workers(state: MARAState) -> list[Send]:
     return [
-        Send("search_worker", {"sub_query": q, "thread_id": state["thread_id"]})
+        Send("search_worker", {
+            "sub_query": q,
+            "research_config": state["config"],
+            "search_results": [],
+            "raw_chunks": [],
+        })
         for q in state["sub_queries"]
     ]
 
-graph.add_conditional_edges("query_planner", dispatch_search_workers)
+builder.add_conditional_edges("query_planner", dispatch_search_workers, ["search_worker"])
 ```
 
 **Subgraph checkpointing:** Each worker subgraph is compiled with `checkpointer=True`, inheriting the parent checkpointer. If a scrape request times out mid-retrieval, LangGraph resumes the worker from `firecrawl_scrape` rather than re-running `brave_search` from scratch.
@@ -205,15 +215,17 @@ This function lives in `merkle/hasher.py`. The determinism guarantee means that 
 **Hash algorithm:** SHA-256, producing a 64-character hex digest. This is stored as a `MerkleLeaf`:
 
 ```python
-@dataclass
-class MerkleLeaf:
-    index: int               # position in the leaf array
-    url: str                 # source URL
-    text: str                # chunk text
-    retrieved_at: str        # ISO timestamp
-    hash: str                # SHA-256 hex digest
-    claim_indices: list[int] # claims derived from this leaf (populated later)
+class MerkleLeaf(TypedDict):
+    url: str               # source URL
+    text: str              # raw chunk text (what was hashed)
+    retrieved_at: str      # ISO-8601 timestamp
+    hash: str              # SHA-256 hex digest of canonical_serialise(url, text, retrieved_at)
+    index: int             # zero-based position in merkle_leaves
+    sub_query: str         # originating sub-query (observability/attribution)
+    contextualized_text: str  # embedding text; equals text until Contextual Retrieval is added
 ```
+
+`contextualized_text` is a forward-compatibility stub: when Anthropic's Contextual Retrieval is implemented (prepending an LLM-generated document-level summary to each chunk), only `source_hasher.py` and the embedding call need to change — the `retriever` node automatically improves without modification.
 
 **Why not hash the entire page?** Research agents retrieve _chunks_, not full documents. Hashing the full page would make the leaf hash sensitive to parts of the page the agent never read, and would break the 1:1 relationship between a leaf and the specific text a claim was derived from.
 
@@ -253,7 +265,45 @@ A Merkle proof for leaf `i` consists of the sibling hash at each level of the tr
 
 ---
 
-### 5. Confidence Scorer
+### 5. Semantic Retriever
+
+**Role:** Selects the top-K most relevant Merkle leaves from the full scraped corpus before passing them to the Claim Extractor. This is the critical step that prevents context-window overflow: a typical research session scrapes 2,000–5,000 chunks (~1.4M tokens), far exceeding the LLM's context limit. The retriever reduces this to `max_claim_sources` (default: 50) leaves, ~15K tokens.
+
+**Why retrieval is necessary:** The full scraped corpus can easily exceed any LLM's context window. Without a retrieval step, the claim extractor would receive all scraped content and either overflow or require a model with a prohibitively large context window. The retriever selects only the most evidentially relevant chunks, making claim extraction tractable regardless of corpus size.
+
+**How it works:**
+
+```python
+# agent/nodes/retriever.py (simplified)
+async def retriever(state: MARAState, config: RunnableConfig) -> dict:
+    leaves = state["merkle_leaves"]
+    k = state["config"].max_claim_sources
+
+    # Score each leaf against the main query AND all sub-queries,
+    # taking the max — a leaf highly relevant to one research angle
+    # should not be penalised by its distance from the others.
+    query_texts = [state["query"]] + [sq["query"] for sq in state["sub_queries"]]
+    leaf_texts = [leaf["contextualized_text"] for leaf in leaves]
+
+    query_embs, leaf_embs = await asyncio.gather(
+        asyncio.to_thread(embed, query_texts, model_name),
+        asyncio.to_thread(embed, leaf_texts, model_name),
+    )
+    # L2-normalised embeddings → dot product == cosine similarity
+    scores = (leaf_embs @ query_embs.T).max(axis=1)
+    top_indices = np.argsort(scores)[::-1][:k]
+    return {"retrieved_leaves": [leaves[int(i)] for i in top_indices]}
+```
+
+**Integrity separation:** The Merkle tree commits to _all_ scraped leaves — retrieval does not affect which sources are recorded. The retriever only determines which subset of those committed sources is used for claim extraction. This keeps the two layers orthogonal: the Merkle root proves what was scraped; `retrieved_leaves` records what was used for reasoning.
+
+**Embedding model:** Uses `confidence.embeddings.embed()` with the configured `embedding_model` (default: `all-MiniLM-L6-v2`). The retriever shares the same model as the Confidence Scorer's SA signal, so there is only one model load at startup.
+
+**LangGraph pattern used:** Standard sequential node. Runs fully asynchronously via `asyncio.to_thread` to avoid blocking the event loop during SentenceTransformer inference.
+
+---
+
+### 6. Confidence Scorer
 
 **Role:** For each factual claim extracted from the retrieved evidence, computes a confidence score estimating the probability the claim is genuinely grounded in the retrieved sources.
 
@@ -321,7 +371,7 @@ confidence < 0.55  →  HITL Checkpoint: human review required
 
 ---
 
-### 6. HITL Checkpoint
+### 7. HITL Checkpoint
 
 **Role:** When one or more claims score below the confidence floor, the graph pauses execution using LangGraph's `interrupt()` mechanism and surfaces the problematic claims to a human reviewer.
 
@@ -333,29 +383,37 @@ The checkpoint presents:
 - Three options: **Approve** (the human overrides and accepts the claim), **Reject** (the claim is dropped from the report), or **Retry** (the human can provide an amended search query to retrieve better sources)
 
 ```python
-def hitl_checkpoint(state: MARState) -> MARState:
-    low_confidence_claims = [
-        c for c in state["scored_claims"]
-        if c.confidence < state["config"]["low_confidence_threshold"]
-    ]
-    if low_confidence_claims:
-        human_decisions = interrupt({
-            "kind": "review_low_confidence_claims",
-            "claims": [c.to_dict() for c in low_confidence_claims],
-            "instructions": "For each claim: approve | reject | retry(query=...)"
+# agent/nodes/hitl_checkpoint.py (simplified)
+def hitl_checkpoint(state: MARAState) -> dict:
+    config = state["config"]
+    needs_review = [c for c in state["scored_claims"]
+                    if c.confidence < config.low_confidence_threshold]
+    auto_approved = [c for c in state["scored_claims"]
+                     if c.confidence >= config.high_confidence_threshold]
+
+    if needs_review:
+        approved_indices = interrupt({
+            "needs_review": [{"index": i, "text": c.text, "confidence": c.confidence,
+                               "source_indices": c.source_indices}
+                             for i, c in enumerate(needs_review)],
+            "auto_approved_count": len(auto_approved),
         })
-        # Resume with human_decisions applied to state
-        return apply_human_decisions(state, human_decisions)
-    return state
+        # Resume: Command(resume={"approved_indices": [0, 2]})
+        human_approved = [needs_review[i] for i in approved_indices["approved_indices"]
+                          if 0 <= i < len(needs_review)]
+    else:
+        human_approved = []
+
+    return {"human_approved_claims": auto_approved + human_approved}
 ```
 
 This is implemented using LangGraph's `interrupt()` + `Command(resume=...)` pattern, which persists the full graph state to the configured checkpointer so the graph can be resumed hours or days later — even after the server restarts. The durable execution guarantee comes from LangGraph's checkpointing infrastructure.
 
 ---
 
-### 7. Report Synthesizer
+### 8. Report Synthesizer
 
-**Role:** Receives the approved, high-confidence claims along with the full set of Merkle leaves and synthesises a coherent prose report with inline citations.
+**Role:** Receives the human-approved claims along with the `retrieved_leaves` set and synthesises a coherent prose report with inline citations.
 
 Each citation in the report is not a simple URL — it is a structured reference that includes the Merkle leaf index:
 
@@ -369,24 +427,22 @@ The synthesizer is prompted to reference claims by their leaf index rather than 
 
 ---
 
-### 8. Certified Output
+### 9. Certified Output
 
 **Role:** The final node. It assembles the research report, the complete Merkle tree (all leaf hashes, all intermediate hashes, the root hash), the Merkle proofs for each cited leaf, and the full LangSmith run URL into a single `CertifiedReport` object.
 
 ```python
 @dataclass
 class CertifiedReport:
-    title: str
-    report_text: str                    # prose with inline [leaf_index:hash] citations
-    merkle_root: str                    # 64-char SHA-256 hex digest
-    merkle_tree: MerkleTree             # full tree for independent verification
-    merkle_proofs: dict[int, list]      # {leaf_index: proof_path}
-    leaves: list[MerkleLeaf]            # all source chunks + hashes
-    scored_claims: list[ScoredClaim]    # all claims with confidence scores
-    langsmith_run_url: str              # direct link to LangSmith trace
-    generated_at: str                   # ISO timestamp
-    config_snapshot: dict               # the exact config used (thresholds, model, etc.)
+    query: str                       # the original research question
+    report_text: str                 # prose with inline [ML:index:hash] citations
+    merkle_root: str                 # 64-char SHA-256 hex digest of the full leaf set
+    leaves: list[MerkleLeaf]         # retrieved leaves used as evidence (not all scraped)
+    scored_claims: list[ScoredClaim] # human-approved claims with confidence scores
+    generated_at: str                # ISO-8601 timestamp (auto-set at construction)
 ```
+
+`leaves` contains the `retrieved_leaves` subset — the sources actually used for claim extraction and synthesis. The full scraped corpus (all `merkle_leaves`) is committed to the Merkle tree and available in state, but the report records only the evidence that was actively used for reasoning.
 
 The `merkle_root` is the definitive identifier for this research session. Two reports with the same Merkle root were produced from exactly the same set of source chunks. Two reports with different Merkle roots, even if they look identical in prose, were produced from different source sets.
 
@@ -456,11 +512,17 @@ For Merkle integrity to hold, chunking must be **deterministic and reproducible*
 
 The current approach uses fixed-size character chunking with overlap, implemented in `agent/nodes/source_hasher.py`. The chunk size and overlap are configurable parameters. This is the simplest chunking strategy that satisfies the determinism requirement.
 
+### Semantic retrieval over the scraped corpus
+
+After all source pages are scraped and hashed, the `retriever` node selects the top `max_claim_sources` (default: 50) leaves from the full `merkle_leaves` corpus using cosine similarity over SentenceTransformer embeddings. This prevents context-window overflow in the Claim Extractor: a typical session produces 2,000–5,000 chunks (~1.4M tokens), far exceeding any LLM's practical context limit.
+
+The retriever scores each leaf against both the main query and all sub-queries, taking the max similarity across all query texts. This captures aspect-specific relevance: a leaf highly relevant to one sub-query should not be penalised by its distance from the others.
+
+**Integrity–retrieval separation:** The Merkle tree is built from _all_ scraped leaves before retrieval runs. Retrieval only determines which subset of committed leaves is used for reasoning — the two layers are orthogonal. The Merkle root proves what was scraped; `retrieved_leaves` records what was used for claim extraction.
+
 ### Planned: local corpus retrieval
 
-Web search covers recent public-web sources. For research over a pre-indexed private corpus (internal documents, downloaded papers, licensed databases), a vector store retrieval step will be added as a third retrieval strategy in the search worker subgraph, sitting alongside web search and citation traversal.
-
-The same determinism constraint applies: chunks stored in the vector index must be produced by the same chunking function used at hash time. The vector store is then queried for semantic neighbours, but the retrieved text is re-hashed against the stored leaf to verify it hasn't changed since indexing.
+For research over a pre-indexed private corpus (internal documents, downloaded papers, licensed databases), a vector store retrieval step can be added as a third retrieval strategy in the search worker subgraph. The same determinism constraint applies: chunks stored in the vector index must be produced by the same chunking function used at hash time.
 
 ### Retrieval experimentation
 
@@ -510,41 +572,45 @@ The graph is typed using Python `TypedDict` to ensure every node receives and re
 
 ```python
 import operator
-from typing import TypedDict, Annotated
+from typing import Any, Annotated
+from typing_extensions import TypedDict
 from langgraph.graph.message import add_messages
 
-class MARState(TypedDict):
-    # Input
+class MARAState(TypedDict):
+    # ---- Input ----
     query: str
     config: ResearchConfig
 
-    # Planner output
+    # ---- Planner output ----
     sub_queries: list[SubQuery]
 
-    # Search worker output (reduced from parallel runs)
-    search_results: Annotated[list[SearchResult], operator.add]  # fan-in: all Brave results
-    raw_chunks: Annotated[list[SourceChunk], operator.add]       # fan-in: all scraped chunks
+    # ---- Search worker fan-in (parallel reduce) ----
+    search_results: Annotated[list[SearchResult], operator.add]  # all Brave results
+    raw_chunks: Annotated[list[SourceChunk], operator.add]       # all scraped chunks
 
-    # Hasher output
-    merkle_leaves: list[MerkleLeaf]
-    merkle_tree: MerkleTree
+    # ---- Source Hasher / Merkle output ----
+    merkle_leaves: list[MerkleLeaf]    # all scraped + hashed leaves
+    merkle_tree: MerkleTree | None
 
-    # Scorer output
+    # ---- Retriever output ----
+    retrieved_leaves: list[MerkleLeaf] # top-K leaves selected by cosine similarity
+
+    # ---- Claim extraction / scoring ----
     extracted_claims: list[Claim]
-    scored_claims: list[ScoredClaim]
+    scored_claims: list[Any]           # list[ScoredClaim] dataclass
 
-    # HITL output
-    human_approved_claims: list[ScoredClaim]
+    # ---- HITL output ----
+    human_approved_claims: list[Any]   # list[ScoredClaim] — approved by human or auto
 
-    # Synthesizer output
+    # ---- Synthesizer output ----
     report_draft: str
 
-    # Final output
+    # ---- Final output ----
     certified_report: CertifiedReport | None
 
-    # Internal
+    # ---- Internal ----
     messages: Annotated[list, add_messages]
-    loop_count: int  # for corrective RAG iteration limit
+    loop_count: int  # corrective RAG iteration counter
 ```
 
 The `Annotated[list[SourceChunk], operator.add]` type on `raw_chunks` is key: it tells LangGraph to _merge_ the lists returned by parallel search workers rather than overwriting the state with each worker's result. This is the standard LangGraph pattern for fan-in after a `Send`-based fan-out.
@@ -739,23 +805,25 @@ MARA_HIGH_CONFIDENCE_THRESHOLD=0.80
 MARA_CONFIDENCE_WEIGHTS__ALPHA=0.4
 ```
 
-| Parameter                      | Default             | Description                                          |
-| ------------------------------ | ------------------- | ---------------------------------------------------- |
-| `model`                        | `claude-sonnet-4-6` | LLM for planning, synthesis, LSA scoring             |
-| `embedding_model`              | `all-MiniLM-L6-v2`  | `sentence-transformers` model for SA and CSC scoring |
-| `max_sources`                  | `30`                | Hard cap on total retrieved chunks                   |
-| `max_workers`                  | `3`                 | Number of parallel search workers                    |
-| `max_corrective_rag_loops`     | `2`                 | Max corrective RAG retries per low-confidence claim  |
-| `high_confidence_threshold`    | `0.80`              | Composite score above which claims go to report      |
-| `low_confidence_threshold`     | `0.55`              | Composite score below which claims go to HITL        |
-| `similarity_support_threshold` | `0.72`              | Cosine similarity for a source to "support" a claim  |
-| `confidence_weights.alpha`     | `0.4`               | Weight for source agreement rate (SA)                |
-| `confidence_weights.beta`      | `0.2`               | Weight for cross-source consistency (CSC)            |
-| `confidence_weights.gamma`     | `0.4`               | Weight for LLM self-assessment (LSA)                 |
-| `hash_algorithm`               | `sha256`            | Hash function for Merkle leaves (extensible)         |
-| `chunk_size`                   | `1000`              | Fixed character chunk size for source text splitting |
-| `chunk_overlap`                | `200`               | Character overlap between consecutive chunks         |
-| `checkpointer`                 | `memory`            | `memory` or `postgres`                               |
+| Parameter                      | Default             | Description                                                       |
+| ------------------------------ | ------------------- | ----------------------------------------------------------------- |
+| `model`                        | `claude-sonnet-4-6` | LLM for planning, synthesis, LSA scoring                          |
+| `embedding_model`              | `all-MiniLM-L6-v2`  | `sentence-transformers` model for retrieval and SA/CSC scoring    |
+| `max_sources`                  | `20`                | Brave results requested per sub-query (Brave API cap: 20/request) |
+| `max_workers`                  | `3`                 | Number of parallel search workers                                 |
+| `max_retrieval_candidates`     | `150`               | Retrieval pool size; reserve for future reranking stage           |
+| `max_claim_sources`            | `50`                | Leaves passed to claim extraction after retrieval (≤ candidates)  |
+| `max_corrective_rag_loops`     | `2`                 | Max corrective RAG retries per low-confidence claim               |
+| `high_confidence_threshold`    | `0.80`              | Composite score above which claims are auto-approved              |
+| `low_confidence_threshold`     | `0.55`              | Composite score below which claims go to HITL                     |
+| `similarity_support_threshold` | `0.72`              | Cosine similarity for a source to "support" a claim               |
+| `confidence_weights.alpha`     | `0.4`               | Weight for source agreement rate (SA)                             |
+| `confidence_weights.beta`      | `0.2`               | Weight for cross-source consistency (CSC)                         |
+| `confidence_weights.gamma`     | `0.4`               | Weight for LLM self-assessment (LSA)                              |
+| `hash_algorithm`               | `sha256`            | Hash function for Merkle leaves (extensible)                      |
+| `chunk_size`                   | `1000`              | Fixed character chunk size for source text splitting              |
+| `chunk_overlap`                | `200`               | Character overlap between consecutive chunks                      |
+| `checkpointer`                 | `memory`            | `memory` or `postgres`                                            |
 
 ---
 
@@ -764,21 +832,24 @@ MARA_CONFIDENCE_WEIGHTS__ALPHA=0.4
 ```
 mara/
 ├── agent/
-│   ├── graph.py              # StateGraph definition and compilation
-│   ├── state.py              # MARState TypedDict and all shared data classes
+│   ├── graph.py              # StateGraph definition and compilation (10 nodes)
+│   ├── state.py              # MARAState TypedDict and all shared data classes
 │   ├── nodes/
 │   │   ├── query_planner.py      # Sub-query decomposition node
 │   │   ├── search_worker/        # Retrieval subgraph (one per sub-query, dispatched via Send)
-│   │   │   ├── graph.py          #   Subgraph definition: brave_search → firecrawl_scrape
-│   │   │   ├── brave.py          #   Brave Search API calls → ranked URLs
-│   │   │   └── firecrawl.py      #   Firecrawl scrape → full page text → deterministic chunks
+│   │   │   ├── graph.py          #   Subgraph: brave_search → firecrawl_scrape
+│   │   │   ├── brave_search.py   #   Brave Search API → ranked URLs + metadata
+│   │   │   └── firecrawl_scrape.py #   Firecrawl scrape → full page text → chunks
 │   │   ├── source_hasher.py      # SHA-256 hash of each chunk; builds Merkle leaves
-│   │   ├── confidence_scorer.py  # LangGraph node: calls into confidence/ for scoring
-│   │   ├── hitl_checkpoint.py    # interrupt() + human decision handling
-│   │   ├── report_synthesizer.py # Claim-to-prose with inline Merkle leaf citations
+│   │   ├── merkle_builder.py     # Assembles MerkleTree from leaf hashes
+│   │   ├── retriever.py          # Cosine-similarity retrieval: all leaves → top-K
+│   │   ├── claim_extractor.py    # LLM extraction: retrieved text → atomic claims
+│   │   ├── confidence_scorer.py  # SA + CSC + LSA → ScoredClaim for each claim
+│   │   ├── hitl_checkpoint.py    # interrupt() + human approval handling
+│   │   ├── report_synthesizer.py # Approved claims → prose with Merkle leaf citations
 │   │   └── certified_output.py   # Assembles final CertifiedReport
 │   └── edges/
-│       └── routing.py        # Conditional edge functions (confidence thresholds → routing)
+│       └── routing.py        # dispatch_search_workers (Send fan-out), route_after_scoring
 ├── merkle/
 │   ├── tree.py               # MerkleTree builder (bottom-up SHA-256 construction)
 │   ├── proof.py              # Merkle proof generation and path verification
@@ -787,14 +858,9 @@ mara/
 │   ├── scorer.py             # Computes SA (Beta-Binomial), CSC (CV), LSA; returns ScoredClaim
 │   ├── embeddings.py         # SentenceTransformer model loading and embedding cache
 │   └── signals.py            # Individual SA, CSC, LSA signal computation functions
-├── evaluation/
-│   ├── evaluators.py         # LangSmith custom evaluators (faithfulness, integrity, coverage)
-│   └── datasets.py           # Test question datasets
 ├── cli/
-│   ├── run.py                # Thin Typer adapter: args → ResearchConfig → agent → stdout
-│   └── verify.py             # mara verify --report report.json
+│   └── run.py                # Typer CLI: `mara run QUERY` and `mara info`
 ├── api/                      # Planned — thin FastAPI adapter over the same agent core
-│   └── routes.py             #   ResearchConfig (request body) → agent → CertifiedReport (response)
 ├── config.py                 # ResearchConfig (BaseSettings) — loads .env, validates all config
 ├── logging.py                # get_logger() factory — mara.* logger hierarchy
 └── prompts/
@@ -804,31 +870,37 @@ mara/
     └── report_synthesizer.py
 
 tests/
-├── conftest.py               # Shared fixtures: mock Brave client, mock Firecrawl, sample MARState
+├── test_config.py                    # ResearchConfig validation, env loading, nested model
+├── test_logging.py                   # get_logger hierarchy
 ├── merkle/
-│   ├── test_hasher.py        # canonical_serialise determinism; hash stability across platforms
-│   ├── test_tree.py          # Tree construction, odd-leaf duplication, root hash correctness
-│   └── test_proof.py         # Proof generation and path verification
+│   ├── test_hasher.py                # canonical_serialise determinism; hash stability
+│   ├── test_tree.py                  # Tree construction, odd-leaf duplication, root hash
+│   └── test_proof.py                 # Proof generation and path verification
 ├── confidence/
-│   ├── test_signals.py       # SA Beta-Binomial formula (numerically verified), CSC edge cases
-│   ├── test_scorer.py        # Composite score computation; routing threshold coverage
-│   └── test_embeddings.py    # Embedding cache behaviour; model loading
+│   ├── test_signals.py               # SA Beta-Binomial formula (numerically verified), CSC
+│   ├── test_scorer.py                # Composite score computation; threshold routing
+│   └── test_embeddings.py            # Embedding cache; model loading
 ├── agent/
+│   ├── test_state.py                 # TypedDict field presence and defaults
+│   ├── test_graph.py                 # Full graph compilation; expected node topology
 │   ├── nodes/
-│   │   ├── test_query_planner.py    # Sub-query decomposition with mocked LLM
-│   │   ├── test_search_worker.py    # brave.py and firecrawl.py with mocked API clients
-│   │   ├── test_source_hasher.py    # Chunk → MerkleLeaf pipeline
+│   │   ├── test_query_planner.py     # Sub-query decomposition with mocked LLM
+│   │   ├── test_source_hasher.py     # Chunk → MerkleLeaf pipeline; contextualized_text
+│   │   ├── test_merkle_builder.py    # MerkleTree assembly from leaves
+│   │   ├── test_retriever.py         # Cosine retrieval; bypass when ≤ k leaves
+│   │   ├── test_claim_extractor.py   # Claim extraction with mocked LLM
 │   │   ├── test_confidence_scorer.py # Node wiring: state in → scored claims out
-│   │   ├── test_hitl_checkpoint.py  # interrupt() dispatch; approve/reject/retry paths
-│   │   └── test_routing.py          # All three confidence routing branches
-│   └── test_graph.py         # Full graph compilation smoke test
-├── cli/
-│   ├── test_run.py           # CLI adapter: arg parsing, ResearchConfig construction, output formatting
-│   └── test_verify.py        # CLI verification against a known-good CertifiedReport fixture
-└── integration/
-    └── test_full_run.py      # End-to-end graph run with all external calls mocked
-
-# tests/api/ — planned, mirrors cli/ structure once api/ is implemented
+│   │   ├── test_hitl_checkpoint.py   # interrupt() dispatch; approve/auto-approve paths
+│   │   ├── test_report_synthesizer.py # Claim-to-prose with mocked LLM
+│   │   ├── test_certified_output.py  # CertifiedReport assembly
+│   │   └── search_worker/
+│   │       ├── test_brave_search.py  # Brave API calls with mocked httpx client
+│   │       ├── test_firecrawl_scrape.py # Firecrawl scrape with mocked client
+│   │       └── test_graph.py         # Search worker subgraph topology
+│   └── edges/
+│       └── test_routing.py           # dispatch_search_workers, route_after_scoring
+└── cli/
+    └── test_run.py                   # CLI: arg parsing, HITL loop, report display
 ```
 
 The `confidence/` module is intentionally decoupled from LangGraph — it contains pure Python functions that take claims and source chunks and return scores. `agent/nodes/confidence_scorer.py` is the thin wrapper that pulls scored claims from state, calls into `confidence/scorer.py`, and writes results back to state. This separation means the scoring logic can be tested, benchmarked, and iterated on without running the full graph.
@@ -991,7 +1063,64 @@ The module structure is deliberately shaped to make testing tractable:
 
 ## Getting Started
 
-> **TBD** — setup instructions, environment variables, and quickstart guide will be added once the initial implementation is stable.
+### Prerequisites
+
+- Python 3.11+
+- [uv](https://docs.astral.sh/uv/) (recommended) or pip
+- API keys for Brave Search, Firecrawl, and Anthropic
+
+### Install
+
+```bash
+git clone <repo>
+cd MARA
+uv sync --group test   # installs runtime + test deps
+uv pip install -e .    # registers the `mara` console script
+```
+
+### Configure
+
+Create a `.env` file in the project root:
+
+```bash
+BRAVE_API_KEY=your_brave_key
+FIRECRAWL_API_KEY=your_firecrawl_key
+ANTHROPIC_API_KEY=your_anthropic_key
+
+# Optional overrides (shown with defaults)
+MARA_MODEL=claude-sonnet-4-6
+MARA_MAX_WORKERS=3
+MARA_HIGH_CONFIDENCE_THRESHOLD=0.80
+MARA_LOW_CONFIDENCE_THRESHOLD=0.55
+MARA_MAX_CLAIM_SOURCES=50
+```
+
+### Run
+
+```bash
+# Run the full research pipeline
+mara run "What are the long-term effects of remote work on productivity?"
+
+# Enable debug logging
+mara run "Your research question" --verbose
+
+# Use a named thread (for checkpointer continuity)
+mara run "Your research question" --thread-id my-session-1
+
+# Print current configuration and graph node list
+mara info
+```
+
+When one or more claims score below `low_confidence_threshold`, the pipeline pauses and presents them in the terminal for review. Enter a comma-separated list of indices to approve, or press Enter to skip all. The graph then resumes with only the approved claims.
+
+### Run tests
+
+```bash
+uv run pytest                      # full suite with coverage
+uv run pytest tests/agent/         # agent layer only
+uv run pytest --cov-report=html    # HTML coverage report
+open htmlcov/index.html
+```
 
 ---
 
