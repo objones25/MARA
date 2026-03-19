@@ -154,8 +154,8 @@ LangSmith traces every node invocation, every LLM call, and every routing decisi
 
 **Role:** Execute retrieval for each sub-query simultaneously. Each worker is a compiled subgraph (`agent/nodes/search_worker/`) with two internal nodes running in sequence:
 
-1. **`brave_search`:** Calls the Brave Search API with the sub-query and returns a ranked list of URLs. Brave operates an independent crawl index and provides clean structured results without requiring any scraping.
-2. **`firecrawl_scrape`:** For each URL returned by `brave_search`, fetches the full page text via Firecrawl (handling JavaScript rendering and anti-bot measures) and splits it into deterministic fixed-size chunks. These chunks — not search snippets — are what get passed to the Source Hasher. See the [Retrieval Strategy](#retrieval-strategy) section for why full-text scraping rather than snippets is required for Merkle hash integrity.
+1. **`brave_search`:** Calls the Brave Search API with the sub-query and collects results from all response sections: web results, news, discussions, and FAQ. Each result carries rich metadata — title, description, `extra_snippets` (up to 5 additional page excerpts), `page_age`, and `result_type`. This full result set fans back into `MARAState.search_results` via an `operator.add` reducer, making Brave's metadata available to every downstream node. Note that these results are **not hashed** — see the [Why Brave search results are not hashed](#why-brave-search-results-are-not-hashed) section for the full explanation.
+2. **`firecrawl_scrape`:** Deduplicates the URLs from `search_results` (the same URL may appear in multiple Brave response sections with distinct metadata, but refers to one page) and batch-scrapes each unique URL via Firecrawl, handling JavaScript rendering and anti-bot measures. The full page markdown is split into deterministic fixed-size chunks. These chunks — not Brave's snippets — are what get passed to the Source Hasher and committed to the Merkle tree. See the [Retrieval Strategy](#retrieval-strategy) section for why full-text scraping is required for Merkle hash integrity. The scraped chunks fan back into `MARAState.raw_chunks` via an `operator.add` reducer.
 
 A third retrieval strategy — citation graph traversal via Firecrawl's crawl endpoint — is planned but not yet implemented. See `agent/nodes/search_worker/graph.py`.
 
@@ -437,6 +437,18 @@ MARA's retrieval pipeline runs two sequential steps per sub-query, implemented a
 
 Separating search and scraping into distinct nodes means their failure modes, retry logic, and LangSmith traces are independent. Swapping out either provider does not touch the other node.
 
+### Why Brave search results are not hashed
+
+Brave results — titles, descriptions, `extra_snippets`, `page_age`, `result_type` — flow into `MARAState.search_results` and are available to every downstream node, but they are **never committed to the Merkle tree**. This is a hard requirement of the integrity protocol, not an oversight.
+
+The Merkle integrity guarantee is: *"at any future time, you can recompute `SHA-256(canonical_serialise(url, text, retrieved_at))` and verify the hash matches."* That guarantee requires the hashed bytes to be **reproducible from first principles** — meaning you fetch the source URL yourself and chunk the raw text yourself. Brave's metadata fails this test on two counts:
+
+1. **Provider-controlled, not reproducible.** Brave's snippets and titles are Brave's own extractions of the page. Brave re-crawls, updates its extraction logic, and changes its ranking signals continuously. The same URL queried tomorrow returns different `extra_snippets` and potentially a different `description`. A hash of Brave's output would produce false verification failures — not because anything was tampered with, but because the provider changed its summary.
+
+2. **Not the authoritative source text.** A Brave snippet is a third party's excerpt of a page, not the page itself. Hashing the snippet would only prove that Brave said a page contained certain text at query time — not that the page actually said it. The entire point of Merkle-backed citations is to bind claims to the raw source bytes that the agent read, so that a reader can independently verify the source says what the report claims. Only the full scraped text, retrieved and chunked by MARA itself, satisfies this.
+
+Brave's data is genuinely useful for everything **except** integrity commitments: pre-screening URLs before scraping, surfacing recency signals (`page_age`) in citations, providing context to the Confidence Scorer and Report Synthesizer, and giving the HITL reviewer richer source context. It is intentionally preserved in state for these purposes. The constraint is narrowly scoped: Brave metadata informs the agent but cannot serve as a source of record for claim attribution.
+
 ### The chunking constraint
 
 For Merkle integrity to hold, chunking must be **deterministic and reproducible**: the same source page must always be split into the same chunks. This rules out chunking strategies that depend on model tokenisation windows, probabilistic sentence boundary detection, or any state not encoded in the source text itself.
@@ -509,7 +521,8 @@ class MARState(TypedDict):
     sub_queries: list[SubQuery]
 
     # Search worker output (reduced from parallel runs)
-    raw_chunks: Annotated[list[SourceChunk], operator.add]  # fan-in: add lists
+    search_results: Annotated[list[SearchResult], operator.add]  # fan-in: all Brave results
+    raw_chunks: Annotated[list[SourceChunk], operator.add]       # fan-in: all scraped chunks
 
     # Hasher output
     merkle_leaves: list[MerkleLeaf]
