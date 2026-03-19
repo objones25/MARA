@@ -129,6 +129,7 @@ async def _run(query: str, thread_id: str) -> None:
         "raw_chunks": [],
         "merkle_leaves": [],
         "merkle_tree": None,
+        "retrieved_leaves": [],
         "extracted_claims": [],
         "scored_claims": [],
         "human_approved_claims": [],

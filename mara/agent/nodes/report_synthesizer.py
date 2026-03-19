@@ -48,10 +48,11 @@ def _format_claims(claims: list, leaves: list[MerkleLeaf]) -> str:
     Returns:
         Multi-line string of formatted claims ready for the prompt.
     """
+    leaf_by_index = {leaf["index"]: leaf for leaf in leaves}
     lines = []
     for claim in claims:
         citations = " ".join(
-            _citation(leaves[i]) for i in claim.source_indices if i < len(leaves)
+            _citation(leaf_by_index[i]) for i in claim.source_indices if i in leaf_by_index
         )
         line = f"- {claim.text} (confidence: {claim.confidence:.2f})"
         if citations:
@@ -71,7 +72,7 @@ async def report_synthesizer(state: MARAState, config: RunnableConfig) -> dict:
         ``{"report_draft": str}``
     """
     claims = state["human_approved_claims"] or state["scored_claims"]
-    leaves = state["merkle_leaves"]
+    leaves = state["retrieved_leaves"]
     query = state["query"]
 
     _log.info("Synthesising report from %d approved claim(s)", len(claims))

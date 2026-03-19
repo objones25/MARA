@@ -14,6 +14,7 @@ EXPECTED_NODES = {
     "search_worker",
     "source_hasher",
     "merkle_builder",
+    "retriever",
     "claim_extractor",
     "confidence_scorer",
     "hitl_checkpoint",

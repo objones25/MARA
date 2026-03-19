@@ -84,7 +84,8 @@ async def confidence_scorer(state: MARAState, config: RunnableConfig) -> dict:
         ``{"scored_claims": list[ScoredClaim]}``
     """
     research_config = state["config"]
-    leaves = state["merkle_leaves"]
+    leaves = state["retrieved_leaves"]
+    leaf_by_index = {leaf["index"]: leaf for leaf in leaves}
     claims = state["extracted_claims"]
 
     _log.info("Scoring %d claims against %d leaves", len(claims), len(leaves))
@@ -96,7 +97,11 @@ async def confidence_scorer(state: MARAState, config: RunnableConfig) -> dict:
 
     scored = []
     for claim in claims:
-        source_texts = [leaves[i]["text"] for i in claim["source_indices"]]
+        source_texts = [
+            leaf_by_index[i]["text"]
+            for i in claim["source_indices"]
+            if i in leaf_by_index
+        ]
         result = await asyncio.to_thread(
             score_claim,
             claim["text"],

@@ -336,6 +336,7 @@ class TestRunAsync:
         await _run("q", "t-1")
         initial_state = mock_graph.ainvoke.call_args.args[0]
         assert initial_state["loop_count"] == 0
+        assert initial_state["retrieved_leaves"] == []
 
 
 # ---------------------------------------------------------------------------

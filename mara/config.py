@@ -58,6 +58,8 @@ class ResearchConfig(BaseSettings):
     low_confidence_threshold: float = Field(default=0.55, ge=0.0, le=1.0)
     similarity_support_threshold: float = Field(default=0.72, ge=0.0, le=1.0)
     max_corrective_rag_loops: int = Field(default=2, ge=0)
+    max_retrieval_candidates: int = Field(default=150, gt=0, description="Retrieval pool size; fed into reranker once implemented")
+    max_claim_sources: int = Field(default=50, gt=0, description="Leaves passed to claim extraction after retrieval (and eventual reranking)")
 
     # Confidence weights (nested — populated via MARA_CONFIDENCE_WEIGHTS__*)
     confidence_weights: ConfidenceWeights = Field(default_factory=ConfidenceWeights)
@@ -68,6 +70,15 @@ class ResearchConfig(BaseSettings):
     # Infrastructure
     checkpointer: str = Field(default="memory", pattern="^(memory|postgres)$")
     postgres_dsn: str = ""
+
+    @model_validator(mode="after")
+    def claim_sources_le_candidates(self) -> "ResearchConfig":
+        if self.max_claim_sources > self.max_retrieval_candidates:
+            raise ValueError(
+                f"max_claim_sources ({self.max_claim_sources}) must be ≤ "
+                f"max_retrieval_candidates ({self.max_retrieval_candidates})"
+            )
+        return self
 
     @model_validator(mode="after")
     def thresholds_are_ordered(self) -> "ResearchConfig":

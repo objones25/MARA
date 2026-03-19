@@ -43,6 +43,7 @@ from mara.agent.nodes.hitl_checkpoint import hitl_checkpoint
 from mara.agent.nodes.merkle_builder import merkle_builder
 from mara.agent.nodes.query_planner import query_planner
 from mara.agent.nodes.report_synthesizer import report_synthesizer
+from mara.agent.nodes.retriever import retriever
 from mara.agent.nodes.search_worker.graph import search_worker
 from mara.agent.nodes.source_hasher import source_hasher
 from mara.agent.state import MARAState
@@ -69,6 +70,7 @@ def build_graph(checkpointer=None):
     builder.add_node("search_worker", search_worker)
     builder.add_node("source_hasher", source_hasher)
     builder.add_node("merkle_builder", merkle_builder)
+    builder.add_node("retriever", retriever)
     builder.add_node("claim_extractor", claim_extractor)
     builder.add_node("confidence_scorer", confidence_scorer)
     builder.add_node("hitl_checkpoint", hitl_checkpoint)
@@ -86,7 +88,8 @@ def build_graph(checkpointer=None):
     # Fan-in → sequential pipeline
     builder.add_edge("search_worker", "source_hasher")
     builder.add_edge("source_hasher", "merkle_builder")
-    builder.add_edge("merkle_builder", "claim_extractor")
+    builder.add_edge("merkle_builder", "retriever")
+    builder.add_edge("retriever", "claim_extractor")
     builder.add_edge("claim_extractor", "confidence_scorer")
 
     # Confidence routing (currently always → hitl_checkpoint)

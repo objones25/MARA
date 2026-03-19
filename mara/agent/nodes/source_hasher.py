@@ -65,6 +65,7 @@ def source_hasher(state: MARAState, config: RunnableConfig) -> dict:
                 hash=digest,
                 index=i,
                 sub_query=chunk["sub_query"],
+                contextualized_text=chunk["text"],
             )
         )
 

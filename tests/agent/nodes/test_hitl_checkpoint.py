@@ -63,6 +63,7 @@ def _make_state(
         raw_chunks=[],
         merkle_leaves=[],
         merkle_tree=None,
+        retrieved_leaves=[],
         extracted_claims=[],
         scored_claims=scored_claims or [],
         human_approved_claims=[],

@@ -49,6 +49,7 @@ def _make_state(
         raw_chunks=chunks or [],
         merkle_leaves=[],
         merkle_tree=None,
+        retrieved_leaves=[],
         extracted_claims=[],
         scored_claims=[],
         human_approved_claims=[],
@@ -161,3 +162,17 @@ class TestSourceHasherMultipleChunks:
         for i, leaf in enumerate(result["merkle_leaves"]):
             assert leaf["url"] == f"https://example.com/{i}"
             assert leaf["text"] == f"text {i}"
+
+
+class TestContextualizedText:
+    def test_contextualized_text_equals_text(self):
+        chunk = _make_chunk(text="sample text for contextualization")
+        result = source_hasher(_make_state([chunk]), config={})
+        leaf = result["merkle_leaves"][0]
+        assert leaf["contextualized_text"] == leaf["text"]
+
+    def test_contextualized_text_present_on_all_leaves(self):
+        chunks = [_make_chunk(url=f"https://example.com/{i}", text=f"text {i}") for i in range(4)]
+        result = source_hasher(_make_state(chunks), config={})
+        for leaf in result["merkle_leaves"]:
+            assert "contextualized_text" in leaf

@@ -1,11 +1,11 @@
 """Claim Extractor node — extracts atomic factual claims from Merkle leaves.
 
-Reads MARAState.merkle_leaves and calls Claude to extract every distinct,
+Reads MARAState.retrieved_leaves and calls Claude to extract every distinct,
 atomic factual claim from the source passages.  Each claim is tagged with
 the global leaf indices that support it, so the Confidence Scorer can look
 up the exact source texts by index.
 
-Why use merkle_leaves rather than raw_chunks?
+Why use retrieved_leaves rather than raw_chunks?
   MerkleLeaf carries the ``index`` field — the leaf's position in
   MARAState.merkle_leaves, which is exactly what Claim.source_indices
   references.  Using the already-indexed leaves avoids recomputing offsets
@@ -102,13 +102,13 @@ def _parse_claims(content: str) -> list[Claim]:
 async def claim_extractor(state: MARAState, config: RunnableConfig) -> dict:
     """Extract atomic factual claims from all Merkle leaves.
 
-    Reads ``state["merkle_leaves"]`` and ``state["config"]``.  Returns an
+    Reads ``state["retrieved_leaves"]`` and ``state["config"]``.  Returns an
     empty list immediately if there are no leaves.
 
     Returns:
         ``{"extracted_claims": list[Claim]}``
     """
-    leaves = state["merkle_leaves"]
+    leaves = state["retrieved_leaves"]
 
     if not leaves:
         _log.warning("No Merkle leaves — returning empty claim list")

@@ -47,7 +47,7 @@ def _make_leaf(index: int) -> MerkleLeaf:
     digest = hash_chunk(url, text, "2026-03-19T10:00:00Z", "sha256")
     return MerkleLeaf(
         url=url, text=text, retrieved_at="2026-03-19T10:00:00Z",
-        hash=digest, index=index, sub_query="q",
+        hash=digest, index=index, sub_query="q", contextualized_text=text,
     )
 
 
@@ -55,6 +55,7 @@ def _make_state(
     query: str = "test query",
     report_draft: str = "Report text.",
     leaves: list | None = None,
+    retrieved: list | None = None,
     tree=None,
     scored: list | None = None,
     human_approved: list | None = None,
@@ -69,6 +70,7 @@ def _make_state(
         raw_chunks=[],
         merkle_leaves=leaves or [],
         merkle_tree=tree,
+        retrieved_leaves=retrieved or [],
         extracted_claims=[],
         scored_claims=scored or [],
         human_approved_claims=human_approved or [],
@@ -103,12 +105,12 @@ class TestCertifiedOutputFields:
 
     def test_leaves_copied_from_state(self):
         leaves = [_make_leaf(0), _make_leaf(1)]
-        result = certified_output(_make_state(leaves=leaves), config={})
+        result = certified_output(_make_state(retrieved=leaves), config={})
         assert len(result["certified_report"].leaves) == 2
 
     def test_leaves_are_independent_copy(self):
         leaves = [_make_leaf(0)]
-        result = certified_output(_make_state(leaves=leaves), config={})
+        result = certified_output(_make_state(retrieved=leaves), config={})
         # Mutating state leaves should not affect the report
         assert result["certified_report"].leaves is not leaves
 

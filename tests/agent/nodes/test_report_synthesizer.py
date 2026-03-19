@@ -51,7 +51,7 @@ def _make_leaf(index: int, url: str = "https://example.com", text: str = "t") ->
     digest = hash_chunk(url, text, "2026-03-19T10:00:00Z", "sha256")
     return MerkleLeaf(
         url=url, text=text, retrieved_at="2026-03-19T10:00:00Z",
-        hash=digest, index=index, sub_query="q",
+        hash=digest, index=index, sub_query="q", contextualized_text=text,
     )
 
 
@@ -69,8 +69,9 @@ def _make_state(
         sub_queries=[],
         search_results=[],
         raw_chunks=[],
-        merkle_leaves=leaves or [],
+        merkle_leaves=[],
         merkle_tree=None,
+        retrieved_leaves=leaves or [],
         extracted_claims=[],
         scored_claims=scored or [],
         human_approved_claims=human_approved or [],

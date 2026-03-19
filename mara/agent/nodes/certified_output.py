@@ -41,12 +41,12 @@ def certified_output(state: MARAState, config: RunnableConfig) -> dict:
         query=state["query"],
         report_text=state["report_draft"],
         merkle_root=merkle_root,
-        leaves=list(state["merkle_leaves"]),
+        leaves=list(state["retrieved_leaves"]),
         scored_claims=list(approved_claims),
     )
 
     _log.info(
-        "Certified report assembled — root %s…, %d leaf/leaves, %d claim(s)",
+        "Certified report assembled — root %s…, %d retrieved leaf/leaves, %d claim(s)",
         merkle_root[:12] if merkle_root else "(empty)",
         len(report.leaves),
         len(report.scored_claims),

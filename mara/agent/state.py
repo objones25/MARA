@@ -92,6 +92,7 @@ class MerkleLeaf(TypedDict):
     hash: str      # hex digest from hash_chunk()
     index: int     # position in merkle_leaves list
     sub_query: str  # originating sub-query (for observability/attribution)
+    contextualized_text: str  # embedding text; equals text until Contextual Retrieval is implemented
 
 
 class Claim(TypedDict):
@@ -202,6 +203,9 @@ class MARAState(TypedDict):
     # ---- Source Hasher / Merkle output ----
     merkle_leaves: list[MerkleLeaf]
     merkle_tree: MerkleTree | None
+
+    # ---- Retriever output ----
+    retrieved_leaves: list[MerkleLeaf]   # top-K leaves selected by retriever node
 
     # ---- Confidence Scorer output ----
     extracted_claims: list[Claim]

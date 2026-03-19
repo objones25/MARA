@@ -77,3 +77,15 @@ class TestResearchConfigValidators:
     def test_invalid_checkpointer_value_raises(self):
         with pytest.raises(ValidationError):
             ResearchConfig(checkpointer="redis")
+
+    def test_max_claim_sources_greater_than_max_retrieval_candidates_raises(self):
+        with pytest.raises(ValidationError, match="max_claim_sources"):
+            ResearchConfig(max_claim_sources=200, max_retrieval_candidates=100)
+
+    def test_max_claim_sources_equal_to_max_retrieval_candidates_is_valid(self):
+        config = ResearchConfig(max_claim_sources=100, max_retrieval_candidates=100)
+        assert config.max_claim_sources == 100
+
+    def test_max_claim_sources_less_than_max_retrieval_candidates_is_valid(self):
+        config = ResearchConfig(max_claim_sources=50, max_retrieval_candidates=150)
+        assert config.max_claim_sources == 50

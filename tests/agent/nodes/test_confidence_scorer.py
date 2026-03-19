@@ -4,7 +4,7 @@ All LLM calls are mocked. Tests cover:
   - _make_llm: passes model/api_key to ChatAnthropic
   - _call_lsa: verdict normalisation, unknown-verdict fallback, whitespace handling
   - confidence_scorer: end-to-end with mocked _make_llm and asyncio.to_thread,
-    empty claims list, source index resolution from merkle_leaves, return shape
+    empty claims list, source index resolution from retrieved_leaves, return shape
 """
 
 import asyncio
@@ -34,6 +34,7 @@ def _make_leaf(url: str, text: str, index: int) -> MerkleLeaf:
         hash=digest,
         index=index,
         sub_query="test query",
+        contextualized_text=text,
     )
 
 
@@ -52,8 +53,9 @@ def _make_state(
         sub_queries=[],
         search_results=[],
         raw_chunks=[],
-        merkle_leaves=leaves or [],
+        merkle_leaves=[],
         merkle_tree=None,
+        retrieved_leaves=leaves or [],
         extracted_claims=claims or [],
         scored_claims=[],
         human_approved_claims=[],
@@ -250,6 +252,7 @@ class TestConfidenceScorerNode:
             raw_chunks=[],
             merkle_leaves=[],
             merkle_tree=None,
+            retrieved_leaves=[],
             extracted_claims=[],
             scored_claims=[],
             human_approved_claims=[],

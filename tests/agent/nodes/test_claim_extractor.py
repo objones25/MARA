@@ -37,6 +37,7 @@ def _make_leaf(index: int, url: str = "https://example.com", text: str = "text")
         hash=digest,
         index=index,
         sub_query="test query",
+        contextualized_text=text,
     )
 
 
@@ -51,8 +52,9 @@ def _make_state(leaves: list[MerkleLeaf] | None = None) -> MARAState:
         sub_queries=[],
         search_results=[],
         raw_chunks=[],
-        merkle_leaves=leaves or [],
+        merkle_leaves=[],
         merkle_tree=None,
+        retrieved_leaves=leaves or [],
         extracted_claims=[],
         scored_claims=[],
         human_approved_claims=[],
