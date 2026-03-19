@@ -42,10 +42,16 @@ class ResearchConfig(BaseSettings):
     embedding_model: str = "all-MiniLM-L6-v2"
 
     # Retrieval
-    max_sources: int = Field(default=30, gt=0)
+    max_sources: int = Field(default=20, gt=0, description="Brave results requested per sub-query (Brave API hard cap is 20 per request)")
     max_workers: int = Field(default=3, gt=0)
     chunk_size: int = Field(default=1000, gt=0)
     chunk_overlap: int = Field(default=200, ge=0)
+
+    # Brave Search parameters
+    brave_freshness: str = Field(
+        default="",
+        description="Optional freshness filter: 'pd' (24h), 'pw' (7d), 'pm' (31d), 'py' (1y), or 'YYYY-MM-DDtoYYYY-MM-DD'. Empty = no filter.",
+    )
 
     # Confidence routing
     high_confidence_threshold: float = Field(default=0.80, ge=0.0, le=1.0)
