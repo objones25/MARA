@@ -3,10 +3,6 @@ name = "mara"
 version = "0.1.0"
 description = "Merkle-Anchored Research Agent — cryptographically verifiable, hallucination-resistant research"
 requires-python = ">=3.13"
-
-[project.scripts]
-mara = "mara.cli.run:app"
-
 dependencies = [
     "langgraph>=0.2",
     "langchain>=0.3",
@@ -21,6 +17,9 @@ dependencies = [
     "psycopg[binary]>=3.0",
     "python-dotenv>=1.0",
 ]
+
+[project.scripts]
+mara = "mara.cli.run:app"
 
 [dependency-groups]
 test = [
