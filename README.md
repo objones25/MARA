@@ -19,7 +19,7 @@
     - [4. Merkle Integrity Layer](#4-merkle-integrity-layer)
       - [How the Merkle tree is built](#how-the-merkle-tree-is-built)
       - [Why a Merkle tree instead of a flat list of hashes?](#why-a-merkle-tree-instead-of-a-flat-list-of-hashes)
-    - [5. Semantic Retriever](#5-semantic-retriever)
+    - [5. Hybrid Retriever](#5-hybrid-retriever)
     - [6. Confidence Scorer](#6-confidence-scorer)
       - [The scoring model](#the-scoring-model)
       - [Routing based on confidence](#routing-based-on-confidence)
@@ -27,11 +27,17 @@
     - [8. Report Synthesizer](#8-report-synthesizer)
     - [9. Certified Output](#9-certified-output)
   - [The Merkle Integrity Protocol](#the-merkle-integrity-protocol)
+  - [Leaf Database](#leaf-database)
+    - [Freshness cache](#freshness-cache)
+    - [Cross-session corpus growth](#cross-session-corpus-growth)
+    - [Embedding persistence](#embedding-persistence)
+    - [Schema overview](#schema-overview)
+    - [Disabling the database](#disabling-the-database)
   - [Retrieval Strategy](#retrieval-strategy)
     - [Current approach](#current-approach)
     - [Why Brave search results are not hashed](#why-brave-search-results-are-not-hashed)
     - [The chunking constraint](#the-chunking-constraint)
-    - [Semantic retrieval over the scraped corpus](#semantic-retrieval-over-the-scraped-corpus)
+    - [Hybrid retrieval over the scraped corpus](#hybrid-retrieval-over-the-scraped-corpus)
     - [Planned: local corpus retrieval](#planned-local-corpus-retrieval)
     - [Retrieval experimentation](#retrieval-experimentation)
   - [Statistical Confidence Scoring](#statistical-confidence-scoring)
@@ -118,7 +124,7 @@ The agent is implemented as a directed `StateGraph` in LangGraph. Control flows 
 │                            │                            │
 │                            ▼                            │
 │                    [Retriever]                          │
-│                     cosine sim → top-K leaves           │
+│                     BM25 + semantic RRF → top-K leaves  │
 │                            │                            │
 │                            ▼                            │
 │                   [Claim Extractor]                     │
@@ -265,41 +271,57 @@ A Merkle proof for leaf `i` consists of the sibling hash at each level of the tr
 
 ---
 
-### 5. Semantic Retriever
+### 5. Hybrid Retriever
 
 **Role:** Selects the top-K most relevant Merkle leaves from the full scraped corpus before passing them to the Claim Extractor. This is the critical step that prevents context-window overflow: a typical research session scrapes 2,000–5,000 chunks (~1.4M tokens), far exceeding the LLM's context limit. The retriever reduces this to `max_claim_sources` (default: 50) leaves, ~15K tokens.
 
 **Why retrieval is necessary:** The full scraped corpus can easily exceed any LLM's context window. Without a retrieval step, the claim extractor would receive all scraped content and either overflow or require a model with a prohibitively large context window. The retriever selects only the most evidentially relevant chunks, making claim extraction tractable regardless of corpus size.
 
-**How it works:**
+**How it works — two-stage strategy:**
+
+**Stage 1 — Embedding cache.** Leaf embeddings are loaded from the SQLite DB when available. Only leaves with no stored embedding — or whose cached blob has a dimension mismatch (model changed between runs) — are passed through the SentenceTransformer model. New embeddings are written back immediately so subsequent runs on the same corpus skip inference entirely.
+
+**Stage 2 — Hybrid Reciprocal Rank Fusion (RRF).** BM25 (FTS5, keyword match) and semantic (cosine similarity) rankings are fused using RRF (k=60). BM25 captures exact-match / named-entity evidence; semantic captures paraphrases and synonym matches. RRF combines both without requiring weight tuning:
+
+```
+RRF_score(d) = 1/(60 + r_sem(d) + 1) + 1/(60 + r_bm25(d) + 1)
+```
+
+Leaves absent from BM25 results receive a penalty rank of `len(leaves)`, keeping their BM25 contribution small but non-zero.
 
 ```python
 # agent/nodes/retriever.py (simplified)
 async def retriever(state: MARAState, config: RunnableConfig) -> dict:
     leaves = state["merkle_leaves"]
     k = state["config"].max_claim_sources
-
-    # Score each leaf against the main query AND all sub-queries,
-    # taking the max — a leaf highly relevant to one research angle
-    # should not be penalised by its distance from the others.
     query_texts = [state["query"]] + [sq["query"] for sq in state["sub_queries"]]
-    leaf_texts = [leaf["contextualized_text"] for leaf in leaves]
 
-    query_embs, leaf_embs = await asyncio.gather(
-        asyncio.to_thread(embed, query_texts, model_name),
-        asyncio.to_thread(embed, leaf_texts, model_name),
+    # Query embeddings establish target_dim for cache dimension validation.
+    query_embs = await asyncio.to_thread(embed, query_texts, model_name)
+    target_dim = query_embs.shape[1]
+
+    # Leaf embeddings: served from SQLite cache where possible.
+    leaf_embs = await _load_or_compute_leaf_embeddings(
+        leaves, model_name, target_dim, leaf_repo
     )
-    # L2-normalised embeddings → dot product == cosine similarity
-    scores = (leaf_embs @ query_embs.T).max(axis=1)
-    top_indices = np.argsort(scores)[::-1][:k]
+    semantic_scores = (leaf_embs @ query_embs.T).max(axis=1)
+    semantic_order = np.argsort(semantic_scores)[::-1]
+
+    # Hybrid: BM25 via FTS5, fused with semantic via RRF.
+    bm25_results = await asyncio.to_thread(leaf_repo.bm25_search, state["query"], run_id, len(leaves))
+    bm25_hash_rank = {r["hash"]: i for i, r in enumerate(bm25_results)}
+    rrf = _rrf_scores(leaves, semantic_scores, semantic_order, bm25_hash_rank)
+    top_indices = np.argsort(rrf)[::-1][:k]
     return {"retrieved_leaves": [leaves[int(i)] for i in top_indices]}
 ```
+
+**Pure-semantic fallback:** When `leaf_db_enabled=False` (or `leaf_repo` is not injected), the retriever falls back to cosine-similarity-only ranking. All existing behaviour is preserved without requiring a database.
 
 **Integrity separation:** The Merkle tree commits to _all_ scraped leaves — retrieval does not affect which sources are recorded. The retriever only determines which subset of those committed sources is used for claim extraction. This keeps the two layers orthogonal: the Merkle root proves what was scraped; `retrieved_leaves` records what was used for reasoning.
 
 **Embedding model:** Uses `confidence.embeddings.embed()` with the configured `embedding_model` (default: `all-MiniLM-L6-v2`). The retriever shares the same model as the Confidence Scorer's SA signal, so there is only one model load at startup.
 
-**LangGraph pattern used:** Standard sequential node. Runs fully asynchronously via `asyncio.to_thread` to avoid blocking the event loop during SentenceTransformer inference.
+**LangGraph pattern used:** Standard sequential node. CPU-bound work (`embed()`, `bm25_search()`) runs via `asyncio.to_thread`; synchronous SQLite cache reads execute on the event loop thread (fast, < 5 ms).
 
 ---
 
@@ -483,6 +505,62 @@ Also note: step 3 above references `canonical_serialise(url, text, retrieved_at)
 
 ---
 
+## Leaf Database
+
+MARA persists every scraped leaf to a local SQLite database (`~/.mara/leaves.db` by default). This gives the pipeline three concrete benefits across sessions: a freshness cache that avoids re-scraping unchanged pages, a growing corpus that improves retrieval coverage over time, and an embedding cache that skips SentenceTransformer inference for leaves whose vector representations are already stored.
+
+The database is implemented as a repository pattern (`mara/db/`). The `LeafRepository` Protocol defines the interface; `SQLiteLeafRepository` is the concrete implementation. A Postgres implementation would need only a new file — no callers change.
+
+### Freshness cache
+
+Before calling the Firecrawl API, `firecrawl_scrape` checks the database for existing leaves for each URL. If fresh leaves are found (within `leaf_cache_max_age_hours`, default: 7 days), the scrape is skipped and the cached chunks are used directly. This prevents burning scrape credits on unchanged pages and significantly reduces per-run latency after the first session.
+
+```python
+# firecrawl_scrape.py (simplified)
+fresh = leaf_repo.get_fresh_leaves_for_url(url, config.leaf_cache_max_age_hours)
+if fresh:
+    # Use cached chunks, skip Firecrawl entirely for this URL
+    cached_chunks.extend(fresh)
+else:
+    urls_to_scrape.append(url)
+```
+
+### Cross-session corpus growth
+
+Every run's leaves are linked to the run via a `run_leaves` join table. This many-to-many design means a leaf can appear across multiple runs if the page is unchanged within the freshness window. Over time the corpus grows organically: each new query that touches different pages adds leaves to the pool. The retriever's BM25 and semantic rankings are scoped to the current run's leaf set, so older leaves from unrelated runs don't pollute retrieval.
+
+### Embedding persistence
+
+After the retriever computes embeddings for a set of leaves, it writes them back to the database as packed `float32` blobs. On subsequent runs, cached blobs are deserialized with `np.frombuffer` and used directly — no SentenceTransformer inference needed. If the configured `embedding_model` changes, a dimension mismatch triggers transparent re-embedding and overwrites the stale blob.
+
+### Schema overview
+
+```
+runs(run_id, query, merkle_root, embedding_model, hash_algorithm, started_at, completed_at)
+leaves(hash, url, text, retrieved_at, contextualized_text, embedding BLOB, embedding_model, parent_hash)
+run_leaves(run_id, leaf_hash, position_index, sub_query)   ← many-to-many join
+
+leaves_fts   ← FTS5 virtual table (porter-ascii tokeniser, auto-sync triggers)
+```
+
+FTS5 provides BM25 ranking natively; three auto-sync triggers (INSERT / UPDATE / DELETE on `leaves`) keep the virtual table in sync without manual maintenance. The `parent_hash` column is nullable and reserved for future parent-child chunking without requiring a schema migration.
+
+The run lifecycle spans the pipeline: `create_run()` at startup → `upsert_leaves()` + `link_leaves_to_run()` after hashing → `complete_run(run_id, merkle_root)` after certified output.
+
+### Disabling the database
+
+Set `leaf_db_enabled=False` (or `MARA_LEAF_DB_ENABLED=false` in `.env`) to disable all DB reads and writes. When disabled:
+
+- `firecrawl_scrape` skips the freshness cache check entirely.
+- `source_hasher` skips `upsert_leaves` / `link_leaves_to_run`.
+- `certified_output` skips `complete_run`.
+- The retriever falls back to pure cosine-similarity ranking.
+- No `SQLiteLeafRepository` is created; no file is opened.
+
+This is the default in CI and unit tests, and requires no code changes — only the environment variable.
+
+---
+
 ## Retrieval Strategy
 
 ### Current approach
@@ -512,11 +590,13 @@ For Merkle integrity to hold, chunking must be **deterministic and reproducible*
 
 The current approach uses fixed-size character chunking with overlap, implemented in `agent/nodes/source_hasher.py`. The chunk size and overlap are configurable parameters. This is the simplest chunking strategy that satisfies the determinism requirement.
 
-### Semantic retrieval over the scraped corpus
+### Hybrid retrieval over the scraped corpus
 
-After all source pages are scraped and hashed, the `retriever` node selects the top `max_claim_sources` (default: 50) leaves from the full `merkle_leaves` corpus using cosine similarity over SentenceTransformer embeddings. This prevents context-window overflow in the Claim Extractor: a typical session produces 2,000–5,000 chunks (~1.4M tokens), far exceeding any LLM's practical context limit.
+After all source pages are scraped and hashed, the `retriever` node selects the top `max_claim_sources` (default: 50) leaves using **Reciprocal Rank Fusion (RRF)** over two signals: BM25 keyword ranking (via SQLite FTS5) and dense semantic ranking (cosine similarity over SentenceTransformer embeddings). This prevents context-window overflow in the Claim Extractor: a typical session produces 2,000–5,000 chunks (~1.4M tokens), far exceeding any LLM's practical context limit.
 
-The retriever scores each leaf against both the main query and all sub-queries, taking the max similarity across all query texts. This captures aspect-specific relevance: a leaf highly relevant to one sub-query should not be penalised by its distance from the others.
+BM25 excels at precise factual queries — exact entity names, statistics, quoted phrases — where a keyword hit is strong evidence of relevance. Semantic retrieval captures paraphrases, synonyms, and contextually related content that keyword matching misses. RRF (k=60, from Cormack, Clarke & Buettcher 2009) fuses the two rankings without requiring weight tuning: each document's score is the sum of its reciprocal ranks in both lists, so a document ranked highly by both signals rises significantly above documents ranked highly by only one.
+
+Both signals score leaves against the main query and all sub-queries, with the max taken across query texts. This captures aspect-specific relevance: a leaf highly relevant to one sub-query should not be penalised by its distance from the others.
 
 **Integrity–retrieval separation:** The Merkle tree is built from _all_ scraped leaves before retrieval runs. Retrieval only determines which subset of committed leaves is used for reasoning — the two layers are orthogonal. The Merkle root proves what was scraped; `retrieved_leaves` records what was used for claim extraction.
 
@@ -526,10 +606,16 @@ For research over a pre-indexed private corpus (internal documents, downloaded p
 
 ### Retrieval experimentation
 
-The retrieval pipeline is one of the primary areas for experimentation as the project develops. Approaches worth evaluating:
+The retrieval pipeline is one of the primary areas for experimentation as the project develops.
 
-- **Hybrid search:** Combining dense (embedding) retrieval with sparse (BM25/keyword) retrieval and rank fusion. Tends to outperform either alone, especially for precise factual queries where exact term match matters.
-- **Contextual retrieval:** Before embedding each chunk, prepend a short LLM-generated summary of where the chunk sits within the broader document (Anthropic's approach). Improves retrieval precision for long documents where individual chunks lose their referential context.
+**Implemented:**
+
+- **Hybrid BM25 + semantic RRF:** Dense (embedding) retrieval and sparse (FTS5/BM25) retrieval fused via Reciprocal Rank Fusion. Outperforms either alone, especially for precise factual queries where exact term match matters.
+- **Embedding cache:** Leaf embeddings persisted as `float32` blobs in SQLite; loaded on subsequent runs to skip SentenceTransformer inference. Includes dim-mismatch detection for model changes.
+
+**Worth evaluating next:**
+
+- **Contextual retrieval:** Before embedding each chunk, prepend a short LLM-generated summary of where the chunk sits within the broader document (Anthropic's approach). Improves retrieval precision for long documents where individual chunks lose their referential context. The `contextualized_text` field on `MerkleLeaf` is a forward-compatibility stub designed for this.
 - **HyDE (Hypothetical Document Embeddings):** Instead of embedding the query directly, generate a hypothetical answer to the query and embed that. The hypothesis embedding is often closer in vector space to real answer documents than the raw question embedding is.
 
 Any retrieval improvement must still produce deterministic chunks that can be hashed and committed to the Merkle tree. Retrieval quality improvements affect which chunks are found; the hash commitment records exactly which chunks were used, whatever the strategy.
@@ -824,6 +910,9 @@ MARA_CONFIDENCE_WEIGHTS__ALPHA=0.4
 | `chunk_size`                   | `1000`              | Fixed character chunk size for source text splitting              |
 | `chunk_overlap`                | `200`               | Character overlap between consecutive chunks                      |
 | `checkpointer`                 | `memory`            | `memory` or `postgres`                                            |
+| `leaf_db_path`                 | `~/.mara/leaves.db` | Path to the SQLite leaf database (tilde-expanded at open time)    |
+| `leaf_cache_max_age_hours`     | `168.0` (7 days)   | How long a scraped URL's leaves are considered fresh              |
+| `leaf_db_enabled`              | `True`              | Set to `False` to disable all DB reads/writes (CI / unit tests)   |
 
 ---
 
@@ -839,17 +928,24 @@ mara/
 │   │   ├── search_worker/        # Retrieval subgraph (one per sub-query, dispatched via Send)
 │   │   │   ├── graph.py          #   Subgraph: brave_search → firecrawl_scrape
 │   │   │   ├── brave_search.py   #   Brave Search API → ranked URLs + metadata
-│   │   │   └── firecrawl_scrape.py #   Firecrawl scrape → full page text → chunks
-│   │   ├── source_hasher.py      # SHA-256 hash of each chunk; builds Merkle leaves
+│   │   │   └── firecrawl_scrape.py #   Firecrawl scrape → full page text → chunks (+ freshness cache)
+│   │   ├── source_hasher.py      # SHA-256 hash of each chunk; builds and persists Merkle leaves
 │   │   ├── merkle_builder.py     # Assembles MerkleTree from leaf hashes
-│   │   ├── retriever.py          # Cosine-similarity retrieval: all leaves → top-K
+│   │   ├── retriever.py          # Hybrid BM25+semantic RRF retrieval: all leaves → top-K
 │   │   ├── claim_extractor.py    # LLM extraction: retrieved text → atomic claims
 │   │   ├── confidence_scorer.py  # SA + CSC + LSA → ScoredClaim for each claim
 │   │   ├── hitl_checkpoint.py    # interrupt() + human approval handling
 │   │   ├── report_synthesizer.py # Approved claims → prose with Merkle leaf citations
-│   │   └── certified_output.py   # Assembles final CertifiedReport
+│   │   └── certified_output.py   # Assembles final CertifiedReport; closes DB run
 │   └── edges/
 │       └── routing.py        # dispatch_search_workers (Send fan-out), route_after_scoring
+├── db/                       # Persistence layer — repository pattern, SQLite implementation
+│   ├── __init__.py           #   Exports LeafRepository, SQLiteLeafRepository
+│   ├── repository.py         #   LeafRepository Protocol (structural subtyping; Postgres-ready)
+│   ├── sqlite_repository.py  #   Concrete SQLite implementation (WAL mode, FTS5 BM25)
+│   ├── schema.sql            #   Raw DDL — auditable via git diff
+│   └── migrations/
+│       └── 001_initial.sql   #   Same as schema.sql; baseline for future ALTER TABLE migrations
 ├── merkle/
 │   ├── tree.py               # MerkleTree builder (bottom-up SHA-256 construction)
 │   ├── proof.py              # Merkle proof generation and path verification
@@ -872,6 +968,8 @@ mara/
 tests/
 ├── test_config.py                    # ResearchConfig validation, env loading, nested model
 ├── test_logging.py                   # get_logger hierarchy
+├── db/
+│   └── test_sqlite_repository.py     # All 44 repository tests use in-memory SQLite (:memory:)
 ├── merkle/
 │   ├── test_hasher.py                # canonical_serialise determinism; hash stability
 │   ├── test_tree.py                  # Tree construction, odd-leaf duplication, root hash
@@ -885,22 +983,22 @@ tests/
 │   ├── test_graph.py                 # Full graph compilation; expected node topology
 │   ├── nodes/
 │   │   ├── test_query_planner.py     # Sub-query decomposition with mocked LLM
-│   │   ├── test_source_hasher.py     # Chunk → MerkleLeaf pipeline; contextualized_text
+│   │   ├── test_source_hasher.py     # Chunk → MerkleLeaf pipeline; DB persistence path
 │   │   ├── test_merkle_builder.py    # MerkleTree assembly from leaves
-│   │   ├── test_retriever.py         # Cosine retrieval; bypass when ≤ k leaves
+│   │   ├── test_retriever.py         # Hybrid RRF + embedding cache; pure-semantic fallback
 │   │   ├── test_claim_extractor.py   # Claim extraction with mocked LLM
 │   │   ├── test_confidence_scorer.py # Node wiring: state in → scored claims out
 │   │   ├── test_hitl_checkpoint.py   # interrupt() dispatch; approve/auto-approve paths
 │   │   ├── test_report_synthesizer.py # Claim-to-prose with mocked LLM
-│   │   ├── test_certified_output.py  # CertifiedReport assembly
+│   │   ├── test_certified_output.py  # CertifiedReport assembly; complete_run DB call
 │   │   └── search_worker/
 │   │       ├── test_brave_search.py  # Brave API calls with mocked httpx client
-│   │       ├── test_firecrawl_scrape.py # Firecrawl scrape with mocked client
+│   │       ├── test_firecrawl_scrape.py # Firecrawl scrape with mocked client; cache hit/miss
 │   │       └── test_graph.py         # Search worker subgraph topology
 │   └── edges/
 │       └── test_routing.py           # dispatch_search_workers, route_after_scoring
 └── cli/
-    └── test_run.py                   # CLI: arg parsing, HITL loop, report display
+    └── test_run.py                   # CLI: arg parsing, HITL loop, report display; DB disabled path
 ```
 
 The `confidence/` module is intentionally decoupled from LangGraph — it contains pure Python functions that take claims and source chunks and return scores. `agent/nodes/confidence_scorer.py` is the thin wrapper that pulls scored claims from state, calls into `confidence/scorer.py`, and writes results back to state. This separation means the scoring logic can be tested, benchmarked, and iterated on without running the full graph.
@@ -1093,6 +1191,11 @@ MARA_MAX_WORKERS=3
 MARA_HIGH_CONFIDENCE_THRESHOLD=0.80
 MARA_LOW_CONFIDENCE_THRESHOLD=0.55
 MARA_MAX_CLAIM_SOURCES=50
+
+# Leaf database (set to false to run without SQLite)
+MARA_LEAF_DB_PATH=~/.mara/leaves.db
+MARA_LEAF_CACHE_MAX_AGE_HOURS=168
+MARA_LEAF_DB_ENABLED=true
 ```
 
 ### Run
