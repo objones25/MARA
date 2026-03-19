@@ -8,6 +8,8 @@ LangGraph's checkpointing layer.
 """
 
 import operator
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Annotated
 from typing_extensions import TypedDict
 
@@ -143,6 +145,38 @@ class SearchWorkerState(TypedDict):
 
 
 # ---------------------------------------------------------------------------
+# Certified output
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class CertifiedReport:
+    """The final verifiable research output produced by MARA.
+
+    Attributes:
+        query:          The original research question.
+        report_text:    Synthesized prose with inline [ML:index:hash] citations.
+        merkle_root:    Root hash of the Merkle tree — embed this in your citation.
+        leaves:         Ordered list of all MerkleLeaf TypedDicts used as evidence.
+        scored_claims:  The approved ScoredClaim dataclass instances (for auditing).
+        generated_at:   ISO-8601 timestamp when certified_output ran.
+
+    Verification: any reader can recompute ``hash_chunk(leaf.url, leaf.text,
+    leaf.retrieved_at, algorithm)`` for each leaf, rebuild the Merkle tree from
+    the resulting hashes, and confirm the root matches ``merkle_root``.
+    """
+
+    query: str
+    report_text: str
+    merkle_root: str
+    leaves: list  # list[MerkleLeaf] — avoid forward-ref cycle with TypedDict
+    scored_claims: list  # list[ScoredClaim] — dataclass from confidence.scorer
+    generated_at: str = field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
+
+
+# ---------------------------------------------------------------------------
 # Top-level graph state
 # ---------------------------------------------------------------------------
 
@@ -152,9 +186,6 @@ class MARAState(TypedDict):
 
     Fields annotated with a reducer (e.g. ``operator.add``) are safe to update
     from parallel nodes.  All other fields are written by exactly one node.
-
-    ``CertifiedReport`` (not yet implemented) remains annotated as ``Any`` and
-    will be tightened when the Report Synthesizer is built.
     """
 
     # ---- Input ----
@@ -181,7 +212,7 @@ class MARAState(TypedDict):
     report_draft: str
 
     # ---- Certified Output ----
-    certified_report: Any  # CertifiedReport | None
+    certified_report: CertifiedReport | None
 
     # ---- Internal ----
     messages: Annotated[list, add_messages]
