@@ -14,6 +14,7 @@ from typing_extensions import TypedDict
 from langgraph.graph.message import add_messages
 
 from mara.config import ResearchConfig
+from mara.merkle.tree import MerkleTree
 
 
 # ---------------------------------------------------------------------------
@@ -71,6 +72,39 @@ class SearchResult(TypedDict):
     result_type: str  # "web" | "news" | "discussion" | "faq"
 
 
+class MerkleLeaf(TypedDict):
+    """A hashed source chunk ready to be committed to the Merkle tree.
+
+    Produced by the Source Hasher node from a SourceChunk.  The
+    (url, text, retrieved_at) triple is what was hashed — a verifier can
+    recompute the hash independently using canonical_serialise().
+
+    ``index`` is the leaf's zero-based position in MARAState.merkle_leaves,
+    which corresponds to its position in MerkleTree.leaves.  It is used when
+    calling generate_merkle_proof() to retrieve a proof for a specific leaf.
+    """
+
+    url: str
+    text: str
+    retrieved_at: str
+    hash: str      # hex digest from hash_chunk()
+    index: int     # position in merkle_leaves list
+    sub_query: str  # originating sub-query (for observability/attribution)
+
+
+class Claim(TypedDict):
+    """An atomic factual claim awaiting confidence scoring.
+
+    Produced by the Claim Extractor node (not yet built) from raw_chunks or
+    the report_draft.  ``source_indices`` are zero-based indices into
+    MARAState.merkle_leaves — the leaves the Confidence Scorer will score the
+    claim against.
+    """
+
+    text: str
+    source_indices: list[int]
+
+
 class SourceChunk(TypedDict):
     """A fixed-size text chunk extracted from a scraped page.
 
@@ -119,9 +153,8 @@ class MARAState(TypedDict):
     Fields annotated with a reducer (e.g. ``operator.add``) are safe to update
     from parallel nodes.  All other fields are written by exactly one node.
 
-    Types from not-yet-implemented modules (Claim, CertifiedReport, MerkleLeaf,
-    MerkleTree) are annotated as ``Any`` here and will be tightened when those
-    modules are built.
+    ``CertifiedReport`` (not yet implemented) remains annotated as ``Any`` and
+    will be tightened when the Report Synthesizer is built.
     """
 
     # ---- Input ----
@@ -136,15 +169,13 @@ class MARAState(TypedDict):
     raw_chunks: Annotated[list[SourceChunk], operator.add]
 
     # ---- Source Hasher / Merkle output ----
-    merkle_leaves: list[Any]   # list[MerkleLeaf]
-    merkle_tree: Any           # MerkleTree
+    merkle_leaves: list[MerkleLeaf]
+    merkle_tree: MerkleTree | None
 
     # ---- Confidence Scorer output ----
-    extracted_claims: list[Any]    # list[Claim]
-    scored_claims: list[Any]       # list[ScoredClaim]
-
-    # ---- HITL Checkpoint output ----
-    human_approved_claims: list[Any]  # list[ScoredClaim]
+    extracted_claims: list[Claim]
+    scored_claims: list[Any]       # list[ScoredClaim] — dataclass, tightened later
+    human_approved_claims: list[Any]  # list[ScoredClaim] — set by HITL node
 
     # ---- Report Synthesizer output ----
     report_draft: str
