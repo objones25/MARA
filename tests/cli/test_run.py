@@ -196,7 +196,7 @@ class TestInfoCommand:
         assert runner.invoke(app, ["info"]).exit_code == 0
 
     def test_shows_model(self):
-        assert "claude" in runner.invoke(app, ["info"]).output
+        assert "Qwen" in runner.invoke(app, ["info"]).output
 
     def test_shows_max_workers(self):
         assert "Max workers" in runner.invoke(app, ["info"]).output

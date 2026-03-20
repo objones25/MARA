@@ -6,7 +6,7 @@ requires-python = ">=3.13"
 dependencies = [
     "langgraph>=0.2",
     "langchain>=0.3",
-    "langchain-anthropic>=0.3",
+    "langchain-huggingface>=0.1",
     "langsmith>=0.2",
     "sentence-transformers>=3.0",
     "firecrawl-py>=1.0",

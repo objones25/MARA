@@ -1,6 +1,6 @@
 """Query Planner node for the top-level MARA graph.
 
-Calls Claude to decompose the user's research question into ``max_workers``
+Calls the LLM to decompose the user's research question into ``max_workers``
 focused sub-queries. Each sub-query is dispatched to a parallel search worker
 via LangGraph's Send() API by the fan-out edge that follows this node.
 
@@ -11,21 +11,21 @@ Why max_workers sub-queries?
   negating the benefit of parallelism.
 
 Why parse JSON manually instead of using structured output?
-  ChatAnthropic.with_structured_output() requires a Pydantic schema.
   SubQuery is a TypedDict (JSON-serializable, LangGraph checkpointable).
   Introducing a parallel Pydantic model just for the LLM boundary adds
   unnecessary indirection. A prompt that returns a bare JSON array is equally
   reliable and keeps the data model in one place.
 
 Why strip markdown fences?
-  Claude occasionally wraps JSON in ```json ... ``` even when instructed not
+  Models occasionally wrap JSON in ```json ... ``` even when instructed not
   to. _parse_sub_queries strips fences defensively without relaxing the
   prompt constraint.
 """
 
 import json
+import re
 
-from langchain_anthropic import ChatAnthropic
+from langchain_huggingface import ChatHuggingFace, HuggingFaceEndpoint
 from langchain_core.runnables import RunnableConfig
 
 from mara.agent.state import MARAState, SubQuery
@@ -34,14 +34,23 @@ from mara.prompts.query_planner import SYSTEM_PROMPT, build_user_message
 
 _log = get_logger(__name__)
 
+_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 
-def _make_llm(model: str, api_key: str) -> ChatAnthropic:
-    """Instantiate the ChatAnthropic client.
 
-    Kept as a module-level factory so tests can patch it without
-    reaching into ChatAnthropic internals.
-    """
-    return ChatAnthropic(model=model, api_key=api_key, max_tokens=1024)
+def _make_llm(model: str, hf_token: str) -> ChatHuggingFace:
+    """Instantiate the ChatHuggingFace client via HuggingFace Inference Providers."""
+    endpoint = HuggingFaceEndpoint(
+        repo_id=model,
+        task="text-generation",
+        huggingfacehub_api_token=hf_token,
+        max_new_tokens=1024,
+    )
+    return ChatHuggingFace(llm=endpoint)
+
+
+def _strip_think(text: str) -> str:
+    """Strip Qwen3 thinking tokens from LLM output."""
+    return _THINK_RE.sub("", text).strip()
 
 
 def _parse_sub_queries(content: str, n: int) -> list[SubQuery]:
@@ -62,7 +71,7 @@ def _parse_sub_queries(content: str, n: int) -> list[SubQuery]:
             stripping.
         ValueError: If the parsed JSON is not a list.
     """
-    text = content.strip()
+    text = _strip_think(content)
 
     # Strip optional markdown code fences (```json ... ``` or ``` ... ```)
     if text.startswith("```"):
@@ -89,7 +98,7 @@ def _parse_sub_queries(content: str, n: int) -> list[SubQuery]:
 async def query_planner(state: MARAState, config: RunnableConfig) -> dict:
     """Decompose the research question into sub-queries for parallel workers.
 
-    Reads ``state["query"]`` and ``state["config"]``.  Calls Claude with the
+    Reads ``state["query"]`` and ``state["config"]``.  Calls the LLM with the
     query planner prompt and parses the JSON array response into SubQuery
     TypedDicts.
 
@@ -101,7 +110,7 @@ async def query_planner(state: MARAState, config: RunnableConfig) -> dict:
 
     _log.info("Planning query into %d sub-queries: %r", n, state["query"])
 
-    llm = _make_llm(research_config.model, research_config.anthropic_api_key)
+    llm = _make_llm(research_config.model, research_config.hf_token)
 
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},

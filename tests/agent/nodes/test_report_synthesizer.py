@@ -3,7 +3,7 @@
 All LLM calls are mocked. Tests cover:
   - _citation: format string for a single leaf
   - _format_claims: multi-claim formatting with confidence and citations
-  - _make_llm: ChatAnthropic instantiation with max_tokens=8192
+  - _make_llm: ChatHuggingFace instantiation with max_new_tokens=8192
   - report_synthesizer: async node — empty claims path, populated path,
     human_approved_claims vs scored_claims fallback, config forwarding
 """
@@ -64,7 +64,7 @@ def _make_state(
     return MARAState(
         query=query,
         config=ResearchConfig(
-            brave_api_key="x", firecrawl_api_key="x", anthropic_api_key="test-key",
+            brave_api_key="x", firecrawl_api_key="x", hf_token="test-token",
         ),
         sub_queries=[],
         search_results=[],
@@ -171,17 +171,23 @@ class TestFormatClaims:
 
 
 class TestMakeLlm:
-    def test_instantiates_chat_anthropic(self, mocker):
-        mock_cls = mocker.patch("mara.agent.nodes.report_synthesizer.ChatAnthropic")
-        _make_llm("claude-sonnet-4-6", "key")
-        mock_cls.assert_called_once_with(
-            model="claude-sonnet-4-6", api_key="key", max_tokens=8192
+    def test_instantiates_chat_hugging_face(self, mocker):
+        mock_endpoint_cls = mocker.patch("mara.agent.nodes.report_synthesizer.HuggingFaceEndpoint")
+        mock_chat_cls = mocker.patch("mara.agent.nodes.report_synthesizer.ChatHuggingFace")
+        _make_llm("Qwen/Qwen3-30B-A3B-Instruct", "hf-key")
+        mock_endpoint_cls.assert_called_once_with(
+            repo_id="Qwen/Qwen3-30B-A3B-Instruct",
+            task="text-generation",
+            huggingfacehub_api_token="hf-key",
+            max_new_tokens=8192,
         )
+        mock_chat_cls.assert_called_once_with(llm=mock_endpoint_cls.return_value)
 
     def test_max_tokens_is_8192(self, mocker):
-        mock_cls = mocker.patch("mara.agent.nodes.report_synthesizer.ChatAnthropic")
+        mock_endpoint_cls = mocker.patch("mara.agent.nodes.report_synthesizer.HuggingFaceEndpoint")
+        mocker.patch("mara.agent.nodes.report_synthesizer.ChatHuggingFace")
         _make_llm("m", "k")
-        assert mock_cls.call_args.kwargs["max_tokens"] == 8192
+        assert mock_endpoint_cls.call_args.kwargs["max_new_tokens"] == 8192
 
 
 # ---------------------------------------------------------------------------

@@ -5,12 +5,12 @@ For each Claim in MARAState.extracted_claims, this node:
   2. Calls score_claim() which computes SA, CSC, and LSA signals and returns a
      ScoredClaim dataclass with a composite confidence score.
   3. The LSA step (LLM Self-Assessment) is handled by a synchronous callable
-     that calls Claude with the lsa_scorer prompt.
+     that calls the LLM with the lsa_scorer prompt.
 
 Why run score_claim via asyncio.to_thread?
   score_claim() contains two synchronous blocking calls: embed() (loads a
   SentenceTransformer model and runs inference) and the LSA callable (calls
-  the Claude API synchronously).  Wrapping in asyncio.to_thread allows the
+  the LLM API synchronously).  Wrapping in asyncio.to_thread allows the
   LangGraph event loop to remain responsive while the blocking I/O runs in
   the default thread pool executor.
 
@@ -22,8 +22,9 @@ Why a synchronous LSA callable (not async)?
 """
 
 import asyncio
+import re
 
-from langchain_anthropic import ChatAnthropic
+from langchain_huggingface import ChatHuggingFace, HuggingFaceEndpoint
 from langchain_core.runnables import RunnableConfig
 
 from mara.agent.state import MARAState
@@ -34,19 +35,32 @@ from mara.prompts.lsa_scorer import SYSTEM_PROMPT, build_user_message
 
 _log = get_logger(__name__)
 
+_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 
-def _make_llm(model: str, api_key: str) -> ChatAnthropic:
-    """Instantiate the ChatAnthropic client for synchronous LSA calls."""
-    return ChatAnthropic(model=model, api_key=api_key, max_tokens=32)
+
+def _make_llm(model: str, hf_token: str) -> ChatHuggingFace:
+    """Instantiate the ChatHuggingFace client for synchronous LSA calls."""
+    endpoint = HuggingFaceEndpoint(
+        repo_id=model,
+        task="text-generation",
+        huggingfacehub_api_token=hf_token,
+        max_new_tokens=32,
+    )
+    return ChatHuggingFace(llm=endpoint)
+
+
+def _strip_think(text: str) -> str:
+    """Strip Qwen3 thinking tokens from LLM output."""
+    return _THINK_RE.sub("", text).strip()
 
 
 def _call_lsa(
-    llm: ChatAnthropic,
+    llm: ChatHuggingFace,
     claim_text: str,
     source_texts: list[str],
     config: RunnableConfig | None = None,
 ) -> LSAVerdict:
-    """Call Claude synchronously and return an LSAVerdict.
+    """Call the LLM synchronously and return an LSAVerdict.
 
     The response is stripped and normalised to one of the three accepted
     verdicts.  Unrecognised responses default to "unsupported" so that a
@@ -54,7 +68,7 @@ def _call_lsa(
     will simply receive a low LSA score.
 
     Args:
-        llm:          Synchronous ChatAnthropic instance.
+        llm:          Synchronous ChatHuggingFace instance.
         claim_text:   The factual claim being assessed.
         source_texts: Source passage texts to assess against.
 
@@ -66,7 +80,7 @@ def _call_lsa(
         {"role": "user", "content": build_user_message(claim_text, source_texts)},
     ]
     response = llm.invoke(messages, config)
-    verdict = response.content.strip().lower()
+    verdict = _strip_think(response.content).lower()
     if verdict in ("supported", "partially_supported", "unsupported"):
         return verdict  # type: ignore[return-value]
     return "unsupported"
@@ -90,7 +104,7 @@ async def confidence_scorer(state: MARAState, config: RunnableConfig) -> dict:
 
     _log.info("Scoring %d claims against %d leaves", len(claims), len(leaves))
 
-    llm = _make_llm(research_config.model, research_config.anthropic_api_key)
+    llm = _make_llm(research_config.lsa_model, research_config.hf_token)
 
     def lsa_callable(claim_text: str, source_texts: list[str]) -> LSAVerdict:
         return _call_lsa(llm, claim_text, source_texts, config)

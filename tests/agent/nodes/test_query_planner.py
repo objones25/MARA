@@ -6,7 +6,7 @@ Test strategy:
   - _parse_sub_queries: pure function, exhaustive branch coverage including
     clean JSON, fenced JSON, non-list responses, missing 'domain' key, and
     truncation to n.
-  - _make_llm: verify it instantiates ChatAnthropic with the correct params.
+  - _make_llm: verify it instantiates ChatHuggingFace with the correct params.
   - query_planner: async node integration — mock _make_llm to inject a fake
     LLM, verify the node reads state correctly and returns {"sub_queries": ...}.
 """
@@ -33,7 +33,7 @@ def _make_state(
     config: ResearchConfig | None = None,
 ) -> MARAState:
     cfg = config or ResearchConfig(
-        anthropic_api_key="test-key",
+        hf_token="test-token",
         brave_api_key="x",
         firecrawl_api_key="x",
         max_workers=3,
@@ -57,7 +57,7 @@ def _make_state(
 
 
 def _make_llm_response(mocker, content: str):
-    """Return a mock that looks like a ChatAnthropic response message."""
+    """Return a mock that looks like a ChatHuggingFace response message."""
     mock_msg = mocker.MagicMock()
     mock_msg.content = content
     return mock_msg
@@ -161,26 +161,33 @@ class TestParseSubQueries:
 
 
 class TestMakeLlm:
-    def test_returns_chat_anthropic_instance(self, mocker):
-        mock_cls = mocker.patch("mara.agent.nodes.query_planner.ChatAnthropic")
-        _make_llm("claude-sonnet-4-6", "sk-test")
-        mock_cls.assert_called_once_with(
-            model="claude-sonnet-4-6",
-            api_key="sk-test",
-            max_tokens=1024,
+    def test_returns_chat_hugging_face_instance(self, mocker):
+        mock_endpoint_cls = mocker.patch("mara.agent.nodes.query_planner.HuggingFaceEndpoint")
+        mock_chat_cls = mocker.patch("mara.agent.nodes.query_planner.ChatHuggingFace")
+        model = "Qwen/Qwen3-30B-A3B-Instruct"
+        token = "hf-test-token"
+        _make_llm(model, token)
+        mock_endpoint_cls.assert_called_once_with(
+            repo_id=model,
+            task="text-generation",
+            huggingfacehub_api_token=token,
+            max_new_tokens=1024,
         )
+        mock_chat_cls.assert_called_once_with(llm=mock_endpoint_cls.return_value)
 
     def test_passes_model_to_constructor(self, mocker):
-        mock_cls = mocker.patch("mara.agent.nodes.query_planner.ChatAnthropic")
-        _make_llm("claude-opus-4-6", "key")
-        call_kwargs = mock_cls.call_args.kwargs
-        assert call_kwargs["model"] == "claude-opus-4-6"
+        mock_endpoint_cls = mocker.patch("mara.agent.nodes.query_planner.HuggingFaceEndpoint")
+        mocker.patch("mara.agent.nodes.query_planner.ChatHuggingFace")
+        _make_llm("Qwen/Qwen3-30B-A3B-Instruct", "key")
+        call_kwargs = mock_endpoint_cls.call_args.kwargs
+        assert call_kwargs["repo_id"] == "Qwen/Qwen3-30B-A3B-Instruct"
 
     def test_passes_api_key_to_constructor(self, mocker):
-        mock_cls = mocker.patch("mara.agent.nodes.query_planner.ChatAnthropic")
+        mock_endpoint_cls = mocker.patch("mara.agent.nodes.query_planner.HuggingFaceEndpoint")
+        mocker.patch("mara.agent.nodes.query_planner.ChatHuggingFace")
         _make_llm("m", "my-api-key")
-        call_kwargs = mock_cls.call_args.kwargs
-        assert call_kwargs["api_key"] == "my-api-key"
+        call_kwargs = mock_endpoint_cls.call_args.kwargs
+        assert call_kwargs["huggingfacehub_api_token"] == "my-api-key"
 
 
 # ---------------------------------------------------------------------------
@@ -228,14 +235,14 @@ class TestQueryPlannerNode:
         mock_make_llm.return_value = mock_llm
 
         cfg = ResearchConfig(
-            anthropic_api_key="ak",
+            hf_token="my-hf-token",
             brave_api_key="x",
             firecrawl_api_key="x",
-            model="claude-opus-4-6",
+            model="Qwen/Qwen3-30B-A3B-Instruct",
             max_workers=3,
         )
         await query_planner(_make_state(config=cfg), config={})
-        mock_make_llm.assert_called_once_with("claude-opus-4-6", "ak")
+        mock_make_llm.assert_called_once_with("Qwen/Qwen3-30B-A3B-Instruct", "my-hf-token")
 
     async def test_uses_config_api_key(self, mocker):
         mock_make_llm = mocker.patch("mara.agent.nodes.query_planner._make_llm")
@@ -246,14 +253,14 @@ class TestQueryPlannerNode:
         mock_make_llm.return_value = mock_llm
 
         cfg = ResearchConfig(
-            anthropic_api_key="secret-key",
+            hf_token="secret-token",
             brave_api_key="x",
             firecrawl_api_key="x",
             max_workers=3,
         )
         await query_planner(_make_state(config=cfg), config={})
         _, called_api_key = mock_make_llm.call_args.args
-        assert called_api_key == "secret-key"
+        assert called_api_key == "secret-token"
 
     async def test_invokes_llm_with_system_and_user_messages(self, mocker):
         mock_llm = self._mock_llm(mocker, _sub_queries_json(3))
@@ -279,7 +286,7 @@ class TestQueryPlannerNode:
     async def test_user_message_contains_n(self, mocker):
         mock_llm = self._mock_llm(mocker, _sub_queries_json(3))
         cfg = ResearchConfig(
-            anthropic_api_key="k",
+            hf_token="k",
             brave_api_key="x",
             firecrawl_api_key="x",
             max_workers=3,
@@ -297,7 +304,7 @@ class TestQueryPlannerNode:
     async def test_truncates_to_max_workers_when_llm_over_produces(self, mocker):
         self._mock_llm(mocker, _sub_queries_json(5))
         cfg = ResearchConfig(
-            anthropic_api_key="k",
+            hf_token="k",
             brave_api_key="x",
             firecrawl_api_key="x",
             max_workers=3,
@@ -308,7 +315,7 @@ class TestQueryPlannerNode:
     async def test_returns_all_when_llm_under_produces(self, mocker):
         self._mock_llm(mocker, _sub_queries_json(2))
         cfg = ResearchConfig(
-            anthropic_api_key="k",
+            hf_token="k",
             brave_api_key="x",
             firecrawl_api_key="x",
             max_workers=3,
@@ -319,7 +326,7 @@ class TestQueryPlannerNode:
     async def test_sub_query_fields_populated_from_llm(self, mocker):
         payload = '[{"query": "processed food inflammation study", "domain": "clinical"}]'
         cfg = ResearchConfig(
-            anthropic_api_key="k",
+            hf_token="k",
             brave_api_key="x",
             firecrawl_api_key="x",
             max_workers=1,

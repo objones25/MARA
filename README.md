@@ -50,6 +50,9 @@
     - [Subgraph isolation](#subgraph-isolation)
   - [LangSmith Observability](#langsmith-observability)
     - [What LangSmith captures](#what-langsmith-captures)
+    - [Nested LLM traces via config forwarding](#nested-llm-traces-via-config-forwarding)
+    - [Tags and metadata at invocation time](#tags-and-metadata-at-invocation-time)
+    - [Python logger (`mara.logging`)](#python-logger-maralogging)
     - [Custom evaluators](#custom-evaluators)
     - [Experiment tracking](#experiment-tracking)
   - [Citation Format](#citation-format)
@@ -65,6 +68,11 @@
     - [Coverage target: 98%](#coverage-target-98)
     - [Testing philosophy](#testing-philosophy)
   - [Getting Started](#getting-started)
+    - [Prerequisites](#prerequisites)
+    - [Install](#install)
+    - [Configure](#configure)
+    - [Run](#run)
+    - [Run tests](#run-tests)
 
 ---
 
@@ -911,7 +919,7 @@ MARA_CONFIDENCE_WEIGHTS__ALPHA=0.4
 | `chunk_overlap`                | `200`               | Character overlap between consecutive chunks                      |
 | `checkpointer`                 | `memory`            | `memory` or `postgres`                                            |
 | `leaf_db_path`                 | `~/.mara/leaves.db` | Path to the SQLite leaf database (tilde-expanded at open time)    |
-| `leaf_cache_max_age_hours`     | `168.0` (7 days)   | How long a scraped URL's leaves are considered fresh              |
+| `leaf_cache_max_age_hours`     | `168.0` (7 days)    | How long a scraped URL's leaves are considered fresh              |
 | `leaf_db_enabled`              | `True`              | Set to `False` to disable all DB reads/writes (CI / unit tests)   |
 
 ---

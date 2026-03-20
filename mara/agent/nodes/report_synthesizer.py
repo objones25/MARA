@@ -1,7 +1,7 @@
 """Report Synthesizer node — writes the research report from approved claims.
 
 Reads the human-approved (or auto-approved) ScoredClaims and the Merkle
-leaves, formats each claim with its inline citations, and asks Claude to
+leaves, formats each claim with its inline citations, and asks the LLM to
 synthesise a coherent research report.
 
 Citation format (from README): [ML:index:hash_prefix]
@@ -16,7 +16,9 @@ Why format citations before the LLM call?
   and structure.
 """
 
-from langchain_anthropic import ChatAnthropic
+import re
+
+from langchain_huggingface import ChatHuggingFace, HuggingFaceEndpoint
 from langchain_core.runnables import RunnableConfig
 
 from mara.agent.state import MARAState, MerkleLeaf
@@ -25,10 +27,23 @@ from mara.prompts.report_synthesizer import SYSTEM_PROMPT, build_user_message
 
 _log = get_logger(__name__)
 
+_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 
-def _make_llm(model: str, api_key: str) -> ChatAnthropic:
-    """Instantiate the ChatAnthropic client for report synthesis."""
-    return ChatAnthropic(model=model, api_key=api_key, max_tokens=8192)
+
+def _make_llm(model: str, hf_token: str) -> ChatHuggingFace:
+    """Instantiate the ChatHuggingFace client for report synthesis."""
+    endpoint = HuggingFaceEndpoint(
+        repo_id=model,
+        task="text-generation",
+        huggingfacehub_api_token=hf_token,
+        max_new_tokens=8192,
+    )
+    return ChatHuggingFace(llm=endpoint)
+
+
+def _strip_think(text: str) -> str:
+    """Strip Qwen3 thinking tokens from LLM output."""
+    return _THINK_RE.sub("", text).strip()
 
 
 def _citation(leaf: MerkleLeaf) -> str:
@@ -82,7 +97,7 @@ async def report_synthesizer(state: MARAState, config: RunnableConfig) -> dict:
         return {"report_draft": ""}
 
     research_config = state["config"]
-    llm = _make_llm(research_config.model, research_config.anthropic_api_key)
+    llm = _make_llm(research_config.model, research_config.hf_token)
 
     formatted = _format_claims(claims, leaves)
     messages = [
@@ -91,7 +106,7 @@ async def report_synthesizer(state: MARAState, config: RunnableConfig) -> dict:
     ]
 
     response = await llm.ainvoke(messages, config)
-    report_text = response.content.strip()
+    report_text = _strip_think(response.content)
 
     _log.info("Report synthesised (%d characters)", len(report_text))
     return {"report_draft": report_text}

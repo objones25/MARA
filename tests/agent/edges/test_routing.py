@@ -48,7 +48,7 @@ def _make_state(
         config=ResearchConfig(
             brave_api_key="x",
             firecrawl_api_key="x",
-            anthropic_api_key="x",
+            hf_token="x",
         ),
         sub_queries=sub_queries or [],
         search_results=[],

@@ -4,7 +4,7 @@ All LLM calls are mocked. Tests cover:
   - _format_leaves: pure function, index/url/text extraction
   - _parse_claims: pure function, all branches (clean JSON, fences, empty text
     filtering, source_indices coercion, non-list error, invalid JSON error)
-  - _make_llm: ChatAnthropic instantiation
+  - _make_llm: ChatHuggingFace instantiation
   - claim_extractor: async node — empty leaves path, populated path, state
     reading, config forwarding, return shape
 """
@@ -45,7 +45,7 @@ def _make_state(leaves: list[MerkleLeaf] | None = None) -> MARAState:
     return MARAState(
         query="What are the economic effects of automation?",
         config=ResearchConfig(
-            anthropic_api_key="test-key",
+            hf_token="test-token",
             brave_api_key="x",
             firecrawl_api_key="x",
         ),
@@ -207,24 +207,31 @@ class TestParseClaims:
 
 
 class TestMakeLlm:
-    def test_instantiates_chat_anthropic(self, mocker):
-        mock_cls = mocker.patch("mara.agent.nodes.claim_extractor.ChatAnthropic")
-        _make_llm("claude-sonnet-4-6", "sk-test")
-        mock_cls.assert_called_once_with(
-            model="claude-sonnet-4-6",
-            api_key="sk-test",
-            max_tokens=4096,
+    def test_instantiates_chat_hugging_face(self, mocker):
+        mock_endpoint_cls = mocker.patch("mara.agent.nodes.claim_extractor.HuggingFaceEndpoint")
+        mock_chat_cls = mocker.patch("mara.agent.nodes.claim_extractor.ChatHuggingFace")
+        model = "Qwen/Qwen3-30B-A3B-Instruct"
+        token = "hf-test-token"
+        _make_llm(model, token)
+        mock_endpoint_cls.assert_called_once_with(
+            repo_id=model,
+            task="text-generation",
+            huggingfacehub_api_token=token,
+            max_new_tokens=4096,
         )
+        mock_chat_cls.assert_called_once_with(llm=mock_endpoint_cls.return_value)
 
     def test_passes_model(self, mocker):
-        mock_cls = mocker.patch("mara.agent.nodes.claim_extractor.ChatAnthropic")
-        _make_llm("claude-opus-4-6", "k")
-        assert mock_cls.call_args.kwargs["model"] == "claude-opus-4-6"
+        mock_endpoint_cls = mocker.patch("mara.agent.nodes.claim_extractor.HuggingFaceEndpoint")
+        mocker.patch("mara.agent.nodes.claim_extractor.ChatHuggingFace")
+        _make_llm("Qwen/Qwen3-32B-Instruct", "k")
+        assert mock_endpoint_cls.call_args.kwargs["repo_id"] == "Qwen/Qwen3-32B-Instruct"
 
     def test_max_tokens_is_4096(self, mocker):
-        mock_cls = mocker.patch("mara.agent.nodes.claim_extractor.ChatAnthropic")
+        mock_endpoint_cls = mocker.patch("mara.agent.nodes.claim_extractor.HuggingFaceEndpoint")
+        mocker.patch("mara.agent.nodes.claim_extractor.ChatHuggingFace")
         _make_llm("m", "k")
-        assert mock_cls.call_args.kwargs["max_tokens"] == 4096
+        assert mock_endpoint_cls.call_args.kwargs["max_new_tokens"] == 4096
 
 
 # ---------------------------------------------------------------------------
@@ -328,15 +335,15 @@ class TestClaimExtractorNode:
         mock_make_llm.return_value = mock_llm
 
         cfg = ResearchConfig(
-            anthropic_api_key="my-key",
+            hf_token="my-token",
             brave_api_key="x",
             firecrawl_api_key="x",
-            model="claude-opus-4-6",
+            model="Qwen/Qwen3-32B-Instruct",
         )
         state = _make_state([_make_leaf(0)])
         state["config"] = cfg
         await claim_extractor(state, config={})
-        mock_make_llm.assert_called_once_with("claude-opus-4-6", "my-key")
+        mock_make_llm.assert_called_once_with("Qwen/Qwen3-32B-Instruct", "my-token")
 
     async def test_handles_fenced_llm_response(self, mocker):
         leaf = _make_leaf(0)

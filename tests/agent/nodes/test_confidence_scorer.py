@@ -1,7 +1,7 @@
 """Tests for mara.agent.nodes.confidence_scorer.
 
 All LLM calls are mocked. Tests cover:
-  - _make_llm: passes model/api_key to ChatAnthropic
+  - _make_llm: passes model/hf_token to ChatHuggingFace via HuggingFaceEndpoint
   - _call_lsa: verdict normalisation, unknown-verdict fallback, whitespace handling
   - confidence_scorer: end-to-end with mocked _make_llm and asyncio.to_thread,
     empty claims list, source index resolution from retrieved_leaves, return shape
@@ -47,8 +47,9 @@ def _make_state(
         config=ResearchConfig(
             brave_api_key="x",
             firecrawl_api_key="x",
-            anthropic_api_key="test-key",
-            model="claude-sonnet-4-6",
+            hf_token="test-token",
+            model="Qwen/Qwen3-30B-A3B-Instruct",
+            lsa_model="Qwen/Qwen3-32B-Instruct",
         ),
         sub_queries=[],
         search_results=[],
@@ -67,7 +68,7 @@ def _make_state(
 
 
 def _mock_lsa_response(mocker, verdict: str):
-    """Return a mock ChatAnthropic response with the given verdict as content."""
+    """Return a mock ChatHuggingFace response with the given verdict as content."""
     mock_resp = mocker.MagicMock()
     mock_resp.content = verdict
     return mock_resp
@@ -79,24 +80,29 @@ def _mock_lsa_response(mocker, verdict: str):
 
 
 class TestMakeLlm:
-    def test_instantiates_chat_anthropic(self, mocker):
-        mock_cls = mocker.patch("mara.agent.nodes.confidence_scorer.ChatAnthropic")
-        _make_llm("claude-sonnet-4-6", "sk-test")
-        mock_cls.assert_called_once_with(
-            model="claude-sonnet-4-6",
-            api_key="sk-test",
-            max_tokens=32,
+    def test_instantiates_chat_hugging_face(self, mocker):
+        mock_endpoint_cls = mocker.patch("mara.agent.nodes.confidence_scorer.HuggingFaceEndpoint")
+        mock_chat_cls = mocker.patch("mara.agent.nodes.confidence_scorer.ChatHuggingFace")
+        _make_llm("Qwen/Qwen3-32B-Instruct", "hf-test-token")
+        mock_endpoint_cls.assert_called_once_with(
+            repo_id="Qwen/Qwen3-32B-Instruct",
+            task="text-generation",
+            huggingfacehub_api_token="hf-test-token",
+            max_new_tokens=32,
         )
+        mock_chat_cls.assert_called_once_with(llm=mock_endpoint_cls.return_value)
 
     def test_passes_model(self, mocker):
-        mock_cls = mocker.patch("mara.agent.nodes.confidence_scorer.ChatAnthropic")
-        _make_llm("claude-opus-4-6", "k")
-        assert mock_cls.call_args.kwargs["model"] == "claude-opus-4-6"
+        mock_endpoint_cls = mocker.patch("mara.agent.nodes.confidence_scorer.HuggingFaceEndpoint")
+        mocker.patch("mara.agent.nodes.confidence_scorer.ChatHuggingFace")
+        _make_llm("Qwen/Qwen3-32B-Instruct", "k")
+        assert mock_endpoint_cls.call_args.kwargs["repo_id"] == "Qwen/Qwen3-32B-Instruct"
 
     def test_max_tokens_is_32(self, mocker):
-        mock_cls = mocker.patch("mara.agent.nodes.confidence_scorer.ChatAnthropic")
+        mock_endpoint_cls = mocker.patch("mara.agent.nodes.confidence_scorer.HuggingFaceEndpoint")
+        mocker.patch("mara.agent.nodes.confidence_scorer.ChatHuggingFace")
         _make_llm("m", "k")
-        assert mock_cls.call_args.kwargs["max_tokens"] == 32
+        assert mock_endpoint_cls.call_args.kwargs["max_new_tokens"] == 32
 
 
 # ---------------------------------------------------------------------------
@@ -232,17 +238,18 @@ class TestConfidenceScorerNode:
         assert "text two" in user_msg
         assert "text one" not in user_msg
 
-    async def test_uses_config_model_and_api_key(self, mocker):
+    async def test_uses_lsa_model_and_hf_token(self, mocker):
         mock_make_llm = mocker.patch("mara.agent.nodes.confidence_scorer._make_llm")
         mock_llm = mocker.MagicMock()
         mock_llm.invoke.return_value = _mock_lsa_response(mocker, "supported")
         mock_make_llm.return_value = mock_llm
 
         cfg = ResearchConfig(
-            anthropic_api_key="my-key",
+            hf_token="my-hf-token",
             brave_api_key="x",
             firecrawl_api_key="x",
-            model="claude-opus-4-6",
+            model="Qwen/Qwen3-30B-A3B-Instruct",
+            lsa_model="Qwen/Qwen3-32B-Instruct",
         )
         state = MARAState(
             query="q",
@@ -262,7 +269,7 @@ class TestConfidenceScorerNode:
             loop_count=0,
         )
         await confidence_scorer(state, config={})
-        mock_make_llm.assert_called_once_with("claude-opus-4-6", "my-key")
+        mock_make_llm.assert_called_once_with("Qwen/Qwen3-32B-Instruct", "my-hf-token")
 
     async def test_claim_with_no_sources_still_scores(self, mocker):
         self._mock_llm_factory(mocker, "unsupported")

@@ -1,6 +1,6 @@
 """Claim Extractor node — extracts atomic factual claims from Merkle leaves.
 
-Reads MARAState.retrieved_leaves and calls Claude to extract every distinct,
+Reads MARAState.retrieved_leaves and calls the LLM to extract every distinct,
 atomic factual claim from the source passages.  Each claim is tagged with
 the global leaf indices that support it, so the Confidence Scorer can look
 up the exact source texts by index.
@@ -27,8 +27,9 @@ Why a single LLM call over all leaves?
 """
 
 import json
+import re
 
-from langchain_anthropic import ChatAnthropic
+from langchain_huggingface import ChatHuggingFace, HuggingFaceEndpoint
 from langchain_core.runnables import RunnableConfig
 
 from mara.agent.state import Claim, MARAState, MerkleLeaf
@@ -37,14 +38,23 @@ from mara.prompts.claim_extractor import SYSTEM_PROMPT, build_user_message
 
 _log = get_logger(__name__)
 
+_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 
-def _make_llm(model: str, api_key: str) -> ChatAnthropic:
-    """Instantiate the ChatAnthropic client.
 
-    Kept as a module-level factory so tests can patch it without
-    reaching into ChatAnthropic internals.
-    """
-    return ChatAnthropic(model=model, api_key=api_key, max_tokens=4096)
+def _make_llm(model: str, hf_token: str) -> ChatHuggingFace:
+    """Instantiate the ChatHuggingFace client via HuggingFace Inference Providers."""
+    endpoint = HuggingFaceEndpoint(
+        repo_id=model,
+        task="text-generation",
+        huggingfacehub_api_token=hf_token,
+        max_new_tokens=4096,
+    )
+    return ChatHuggingFace(llm=endpoint)
+
+
+def _strip_think(text: str) -> str:
+    """Strip Qwen3 thinking tokens from LLM output."""
+    return _THINK_RE.sub("", text).strip()
 
 
 def _format_leaves(leaves: list[MerkleLeaf]) -> list[tuple[int, str, str]]:
@@ -76,7 +86,7 @@ def _parse_claims(content: str) -> list[Claim]:
             stripping.
         ValueError: If the parsed JSON is not a list.
     """
-    text = content.strip()
+    text = _strip_think(content)
 
     if text.startswith("```"):
         lines = text.splitlines()
@@ -117,7 +127,7 @@ async def claim_extractor(state: MARAState, config: RunnableConfig) -> dict:
     _log.info("Extracting claims from %d leaf/leaves", len(leaves))
 
     research_config = state["config"]
-    llm = _make_llm(research_config.model, research_config.anthropic_api_key)
+    llm = _make_llm(research_config.model, research_config.hf_token)
 
     passages = _format_leaves(leaves)
     messages = [
