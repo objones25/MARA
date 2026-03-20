@@ -3,7 +3,8 @@
 Node sequence
 -------------
     query_planner
-        → [search_worker × N]   (fan-out via Send API)
+        → [search_worker × N]   (fan-out via Send API — Brave + Firecrawl)
+        → [arxiv_worker  × N]   (fan-out via Send API — ArXiv API + Firecrawl)
         → source_hasher
         → merkle_builder
         → claim_extractor
@@ -44,7 +45,7 @@ from mara.agent.nodes.merkle_builder import merkle_builder
 from mara.agent.nodes.query_planner import query_planner
 from mara.agent.nodes.report_synthesizer import report_synthesizer
 from mara.agent.nodes.retriever import retriever
-from mara.agent.nodes.search_worker.graph import search_worker
+from mara.agent.nodes.search_worker.graph import arxiv_worker, search_worker
 from mara.agent.nodes.source_hasher import source_hasher
 from mara.agent.state import MARAState
 from mara.logging import get_logger
@@ -78,6 +79,7 @@ def build_graph(checkpointer=None, config_schemas=None):
     # --- Nodes -----------------------------------------------------------
     builder.add_node("query_planner", query_planner)
     builder.add_node("search_worker", search_worker)
+    builder.add_node("arxiv_worker", arxiv_worker)
     builder.add_node("source_hasher", source_hasher)
     builder.add_node("merkle_builder", merkle_builder)
     builder.add_node("retriever", retriever)
@@ -90,13 +92,14 @@ def build_graph(checkpointer=None, config_schemas=None):
     # --- Edges -----------------------------------------------------------
     builder.add_edge(START, "query_planner")
 
-    # Fan-out: one search_worker per sub_query
+    # Fan-out: search_worker + arxiv_worker per sub_query
     builder.add_conditional_edges(
-        "query_planner", dispatch_search_workers, ["search_worker"]
+        "query_planner", dispatch_search_workers, ["search_worker", "arxiv_worker"]
     )
 
-    # Fan-in → sequential pipeline
+    # Fan-in: both worker types converge on source_hasher
     builder.add_edge("search_worker", "source_hasher")
+    builder.add_edge("arxiv_worker", "source_hasher")
     builder.add_edge("source_hasher", "merkle_builder")
     builder.add_edge("merkle_builder", "retriever")
     builder.add_edge("retriever", "claim_extractor")

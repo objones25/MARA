@@ -233,6 +233,7 @@ def info() -> None:
     if config.leaf_db_enabled:
         typer.echo(f"  Leaf DB path:         {config.leaf_db_path}")
         typer.echo(f"  Leaf cache max age:   {config.leaf_cache_max_age_hours}h")
+    typer.echo(f"  ArXiv max results:    {config.arxiv_max_results} papers/sub-query")
 
     typer.echo("\nGraph nodes:")
     graph = build_graph()

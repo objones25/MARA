@@ -12,6 +12,7 @@ from mara.agent.graph import build_graph
 EXPECTED_NODES = {
     "query_planner",
     "search_worker",
+    "arxiv_worker",
     "source_hasher",
     "merkle_builder",
     "retriever",

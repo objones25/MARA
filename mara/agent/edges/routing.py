@@ -9,33 +9,43 @@ _log = get_logger(__name__)
 
 
 def dispatch_search_workers(state: MARAState) -> list[Send]:
-    """Fan-out one search_worker subgraph invocation per sub_query.
+    """Fan-out one search_worker and one arxiv_worker per sub_query.
 
     Called on the conditional edge from query_planner.  Each Send carries
     the sub_query and a copy of ResearchConfig so the subgraph is fully
     self-contained — it needs no access to the parent MARAState.
 
+    For each sub-query two workers run concurrently:
+      - search_worker: Brave Search → Firecrawl (web pages)
+      - arxiv_worker:  ArXiv API   → Firecrawl (academic PDFs)
+
+    Both produce raw_chunks merged into MARAState via operator.add.
+
     Args:
         state: MARAState with sub_queries populated by query_planner.
 
     Returns:
-        One Send object per sub_query, targeting the "search_worker" node.
+        Two Send objects per sub_query (search_worker + arxiv_worker).
     """
     sub_queries = state["sub_queries"]
     research_config = state["config"]
-    _log.info("Dispatching %d search worker(s)", len(sub_queries))
-    return [
-        Send(
-            "search_worker",
-            {
-                "sub_query": q,
-                "research_config": research_config,
-                "search_results": [],
-                "raw_chunks": [],
-            },
-        )
-        for q in sub_queries
-    ]
+    sends: list[Send] = []
+    for q in sub_queries:
+        payload = {
+            "sub_query": q,
+            "research_config": research_config,
+            "search_results": [],
+            "raw_chunks": [],
+        }
+        sends.append(Send("search_worker", payload))
+        sends.append(Send("arxiv_worker", payload))
+    _log.info(
+        "Dispatching %d worker(s): %d web + %d arxiv",
+        len(sends),
+        len(sub_queries),
+        len(sub_queries),
+    )
+    return sends
 
 
 def route_after_scoring(state: MARAState) -> str:
