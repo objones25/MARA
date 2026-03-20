@@ -135,5 +135,5 @@ async def firecrawl_scrape(state: SearchWorkerState, config: RunnableConfig) -> 
                 )
             )
 
-    _log.debug("Produced %d chunk(s) from %d URL(s)", len(raw_chunks), len(urls))
+    _log.debug("Produced %d chunk(s) from:\n%s", len(raw_chunks), "\n".join(f"  {u}" for u in urls))
     return {"raw_chunks": raw_chunks}
