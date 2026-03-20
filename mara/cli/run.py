@@ -122,7 +122,13 @@ def _display_report(report: CertifiedReport) -> None:
 async def _run(query: str, thread_id: str, output_dir: Path | None = None) -> None:
     """Core async pipeline runner.  Called by the ``run`` CLI command."""
     config = ResearchConfig()
-    checkpointer = MemorySaver(serde=JsonPlusSerializer())
+    checkpointer = MemorySaver(serde=JsonPlusSerializer(
+        allowed_msgpack_modules=[
+            ("mara.config", "ResearchConfig"),
+            ("mara.merkle.tree", "MerkleTree"),
+            ("mara.confidence.scorer", "ScoredClaim"),
+        ]
+    ))
     graph = build_graph(checkpointer=checkpointer)
 
     # Build the RunnableConfig, injecting leaf_repo + run_id when enabled.
