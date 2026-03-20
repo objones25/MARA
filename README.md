@@ -53,8 +53,6 @@
     - [Nested LLM traces via config forwarding](#nested-llm-traces-via-config-forwarding)
     - [Tags and metadata at invocation time](#tags-and-metadata-at-invocation-time)
     - [Python logger (`mara.logging`)](#python-logger-maralogging)
-    - [Custom evaluators](#custom-evaluators)
-    - [Experiment tracking](#experiment-tracking)
   - [Citation Format](#citation-format)
   - [Verification](#verification)
   - [Configuration Reference](#configuration-reference)
@@ -359,7 +357,7 @@ The confidence score for claim `c` is the **Beta-Binomial posterior mean** updat
 confidence(c) = SA(c) = (1 + k) / (2 + k)
 ```
 
-where `k` is the number of retrieved leaves whose cosine similarity to the claim exceeds `similarity_support_threshold` (default τ = 0.85).
+where `k` is the number of retrieved leaves whose cosine similarity to the claim exceeds `similarity_support_threshold` (default τ = 0.60).
 
 Non-corroborating leaves — those that do not mention or contradict the claim — are excluded from the denominator entirely. Their silence is not evidence of contradiction; they are simply irrelevant to that claim. Only positive corroboration moves the score.
 
@@ -370,7 +368,7 @@ This is the Laplace-smoothed estimator from a `Beta(1, 1)` prior (uniform / maxi
 - 3 corroborating leaves → SA = 0.80 (clears `high_confidence_threshold`)
 - k → ∞                 → SA → 1.0 (never exactly reached)
 
-The score is always in the open interval (0, 1). Similarities are computed between `SentenceTransformer("all-MiniLM-L6-v2")` embeddings of the claim and each retrieved leaf text.
+The score is always in the open interval (0, 1). Similarities are computed between `SentenceTransformer("all-MiniLM-L6-v2")` embeddings of the claim and each retrieved leaf's `contextualized_text`.
 
 #### Routing based on confidence
 
@@ -433,7 +431,8 @@ def hitl_checkpoint(state: MARAState) -> dict:
 
     decision = interrupt({
         "needs_review": [{"index": i, "text": c.text, "confidence": c.confidence,
-                           "source_indices": c.source_indices}
+                           "corroborating": c.corroborating, "n_leaves": c.n_leaves,
+                           "source_indices": c.source_indices, "contested": c.contested}
                          for i, c in enumerate(needs_review)],
         "auto_approved_count": len(auto_approved),
     })
@@ -794,53 +793,6 @@ logging.getLogger("mara").setLevel(logging.DEBUG)
 
 The `mara.*` hierarchy is separate from LangSmith — it covers business-logic events like node entry/exit counts, degraded-but-non-fatal conditions (e.g. LLM under-produced sub-queries), and non-LLM node completions that don't appear in LangSmith traces at all.
 
-### Custom evaluators
-
-MARA ships with three LangSmith evaluators that can be run against any set of completed research runs:
-
-**Faithfulness evaluator:** Checks that every claim in the certified report is attributable to a Merkle leaf. Flags any claim with a leaf index that doesn't exist in the tree.
-
-```python
-def faithfulness_evaluator(run, example):
-    report = run.outputs["certified_report"]
-    tree_indices = {leaf.index for leaf in report.leaves}
-    cited_indices = extract_citation_indices(report.report_text)
-    unfaithful = cited_indices - tree_indices
-    return {
-        "key": "faithfulness",
-        "score": 1.0 if not unfaithful else 0.0,
-        "comment": f"Uncited leaf indices: {unfaithful}"
-    }
-```
-
-**Merkle integrity evaluator:** Recomputes the entire Merkle tree from the stored leaves and checks that the resulting root hash matches the root hash embedded in the report.
-
-```python
-def merkle_integrity_evaluator(run, example):
-    report = run.outputs["certified_report"]
-    recomputed_root = build_merkle_tree(report.leaves).root
-    match = recomputed_root == report.merkle_root
-    return {
-        "key": "merkle_integrity",
-        "score": 1.0 if match else 0.0,
-        "comment": f"Root match: {match}"
-    }
-```
-
-**Confidence coverage evaluator:** Measures the fraction of claims in the report that have a confidence score above the configured high threshold, as a measure of overall report quality.
-
-```python
-def confidence_coverage_evaluator(run, example):
-    claims = run.outputs["certified_report"].scored_claims
-    high_conf = sum(1 for c in claims if c.confidence >= HIGH_THRESHOLD)
-    score = high_conf / len(claims) if claims else 0.0
-    return {"key": "confidence_coverage", "score": score}
-```
-
-### Experiment tracking
-
-Different configurations — different confidence thresholds, different LLMs, different retrieval strategies — can be compared against the same set of research questions using LangSmith's `evaluate()` function. This makes MARA's confidence and integrity pipeline fully benchmarkable.
-
 ---
 
 ## Citation Format
@@ -918,7 +870,7 @@ MARA_HIGH_CONFIDENCE_THRESHOLD=0.80
 | `max_new_pages_per_round`      | `5`                                | Max new pages scraped per corrective sub-query per round                                             |
 | `high_confidence_threshold`    | `0.80`                             | SA score above which claims are auto-approved                                                        |
 | `low_confidence_threshold`     | `0.55`                             | SA score below which claims trigger corrective retrieval or HITL                                     |
-| `similarity_support_threshold` | `0.85`                             | Cosine similarity (exclusive) for a leaf to count as corroborating a claim                          |
+| `similarity_support_threshold` | `0.60`                             | Cosine similarity (exclusive) for a leaf to count as corroborating a claim                          |
 | `query_planner_max_tokens`     | `1024`                             | Max new tokens for the query planner LLM call                                                        |
 | `claim_extractor_max_tokens`   | `16384`                            | Max new tokens for the claim extractor LLM call                                                      |
 | `report_synthesizer_max_tokens`| `8192`                             | Max new tokens for the report synthesizer LLM call                                                   |
@@ -990,7 +942,7 @@ tests/
 ├── test_report_store.py              # Report save/load round-trip
 ├── test_verifier.py                  # Merkle integrity verification
 ├── db/
-│   └── test_sqlite_repository.py     # All 55 repository tests use in-memory SQLite (:memory:)
+│   └── test_sqlite_repository.py     # All 56 repository tests use in-memory SQLite (:memory:)
 ├── merkle/
 │   ├── test_hasher.py                # canonical_serialise determinism; hash stability
 │   ├── test_tree.py                  # Tree construction, odd-leaf duplication, root hash
