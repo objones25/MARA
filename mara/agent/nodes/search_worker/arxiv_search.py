@@ -161,15 +161,19 @@ async def arxiv_search(state: SearchWorkerState, config: RunnableConfig) -> dict
         "sortOrder": "descending",
     }
 
-    async with httpx.AsyncClient() as client:
-        response = await client.get(
-            _ARXIV_API_URL,
-            params=params,
-            headers={"Accept": "application/xml"},
-            timeout=30.0,
-        )
-        response.raise_for_status()
-        xml_text = response.text
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                _ARXIV_API_URL,
+                params=params,
+                headers={"Accept": "application/xml"},
+                timeout=60.0,
+            )
+            response.raise_for_status()
+            xml_text = response.text
+    except (httpx.TimeoutException, httpx.HTTPStatusError, httpx.HTTPError) as exc:
+        _log.warning("ArXiv request failed for %r: %s — returning no results", query, exc)
+        return {"search_results": []}
 
     papers = _parse_entries(xml_text)
 

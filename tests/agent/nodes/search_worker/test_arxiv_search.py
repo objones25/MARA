@@ -327,7 +327,17 @@ class TestArxivSearchNode:
         assert result["search_results"] == []
 
     @pytest.mark.asyncio
-    async def test_http_error_propagates(self, mocker):
+    async def test_http_error_returns_empty_results(self, mocker):
         _mock_http(mocker, "", status_error=True)
-        with pytest.raises(httpx.HTTPStatusError):
-            await arxiv_search(_make_state(), config={})
+        result = await arxiv_search(_make_state(), config={})
+        assert result == {"search_results": []}
+
+    @pytest.mark.asyncio
+    async def test_timeout_returns_empty_results(self, mocker):
+        mock_client = mocker.AsyncMock()
+        mock_client.__aenter__.return_value.get = mocker.AsyncMock(
+            side_effect=httpx.ReadTimeout("timed out")
+        )
+        mocker.patch("mara.agent.nodes.search_worker.arxiv_search.httpx.AsyncClient", return_value=mock_client)
+        result = await arxiv_search(_make_state(), config={})
+        assert result == {"search_results": []}
