@@ -9,7 +9,7 @@ independently of the orchestration code.  A formal prompt evaluation
 framework is planned for a future milestone.
 """
 
-SYSTEM_PROMPT = """\
+_BASE = """\
 You are a claim extractor for MARA, a Merkle-Assured Research Agent.
 
 Your task: read a set of numbered source passages and extract every distinct,
@@ -27,8 +27,16 @@ Output format (strict JSON array):
 [
   {"text": "<atomic claim>", "source_indices": [<int>, ...]},
   ...
-]
-"""
+]"""
+
+
+def build_system_prompt(run_date: str) -> str:
+    """Return the system prompt with today's date injected.
+
+    Args:
+        run_date: YYYY-MM-DD string for the pipeline start date (UTC).
+    """
+    return f"Today's date is {run_date}.\n\n{_BASE}"
 
 
 def build_user_message(passages: list[tuple[int, str, str]]) -> str:

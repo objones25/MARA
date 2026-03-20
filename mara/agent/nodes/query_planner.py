@@ -29,7 +29,7 @@ from langchain_core.runnables import RunnableConfig
 from mara.agent.llm import make_llm, strip_think
 from mara.agent.state import MARAState, SubQuery
 from mara.logging import get_logger
-from mara.prompts.query_planner import SYSTEM_PROMPT, build_user_message
+from mara.prompts.query_planner import build_system_prompt, build_user_message
 
 _log = get_logger(__name__)
 
@@ -94,7 +94,7 @@ async def query_planner(state: MARAState, config: RunnableConfig) -> dict:
     llm = make_llm(research_config.model, research_config.hf_token, 1024, research_config.hf_provider)
 
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": build_system_prompt(state["run_date"])},
         {"role": "user", "content": build_user_message(state["query"], n)},
     ]
 

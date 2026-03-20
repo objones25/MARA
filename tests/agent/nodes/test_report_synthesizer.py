@@ -61,6 +61,7 @@ def _make_state(
 ) -> MARAState:
     return MARAState(
         query=query,
+        run_date="2026-03-20",
         config=ResearchConfig(
             brave_api_key="x", firecrawl_api_key="x", hf_token="test-token",
         ),

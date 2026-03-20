@@ -21,7 +21,7 @@ from langchain_core.runnables import RunnableConfig
 from mara.agent.llm import make_llm, strip_think
 from mara.agent.state import MARAState, MerkleLeaf
 from mara.logging import get_logger
-from mara.prompts.report_synthesizer import SYSTEM_PROMPT, build_user_message
+from mara.prompts.report_synthesizer import build_system_prompt, build_user_message
 
 _log = get_logger(__name__)
 
@@ -81,7 +81,7 @@ async def report_synthesizer(state: MARAState, config: RunnableConfig) -> dict:
 
     formatted = _format_claims(claims, leaves)
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": build_system_prompt(state["run_date"])},
         {"role": "user", "content": build_user_message(query, formatted)},
     ]
 

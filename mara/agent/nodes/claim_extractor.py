@@ -33,7 +33,7 @@ from langchain_core.runnables import RunnableConfig
 from mara.agent.llm import make_llm, strip_think
 from mara.agent.state import Claim, MARAState, MerkleLeaf
 from mara.logging import get_logger
-from mara.prompts.claim_extractor import SYSTEM_PROMPT, build_user_message
+from mara.prompts.claim_extractor import build_system_prompt, build_user_message
 
 _log = get_logger(__name__)
 
@@ -112,7 +112,7 @@ async def claim_extractor(state: MARAState, config: RunnableConfig) -> dict:
 
     passages = _format_leaves(leaves)
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": build_system_prompt(state["run_date"])},
         {"role": "user", "content": build_user_message(passages)},
     ]
 

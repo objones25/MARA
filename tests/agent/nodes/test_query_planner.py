@@ -38,6 +38,7 @@ def _make_state(
     )
     return MARAState(
         query=query,
+        run_date="2026-03-20",
         config=cfg,
         sub_queries=[],
         search_results=[],
@@ -233,11 +234,11 @@ class TestQueryPlannerNode:
         assert roles == ["system", "user"]
 
     async def test_system_message_contains_system_prompt(self, mocker):
-        from mara.prompts.query_planner import SYSTEM_PROMPT
+        from mara.prompts.query_planner import build_system_prompt
         mock_llm = self._mock_llm(mocker, _sub_queries_json(3))
         await query_planner(_make_state(), config={})
         messages = mock_llm.ainvoke.call_args.args[0]
-        assert messages[0]["content"] == SYSTEM_PROMPT
+        assert messages[0]["content"] == build_system_prompt("2026-03-20")
 
     async def test_user_message_contains_research_question(self, mocker):
         mock_llm = self._mock_llm(mocker, _sub_queries_json(3))

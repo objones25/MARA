@@ -151,8 +151,10 @@ async def _run(query: str, thread_id: str, output_dir: Path | None = None) -> No
 
     run_config = {"configurable": configurable}
 
+    from datetime import datetime, timezone
     initial_state = {
         "query": query,
+        "run_date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
         "config": config,
         "sub_queries": [],
         "search_results": [],

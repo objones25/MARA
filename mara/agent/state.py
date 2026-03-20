@@ -192,6 +192,7 @@ class MARAState(TypedDict):
 
     # ---- Input ----
     query: str
+    run_date: str   # YYYY-MM-DD UTC date when the pipeline started
     config: ResearchConfig
 
     # ---- Planner output ----

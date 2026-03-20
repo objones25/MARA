@@ -42,6 +42,7 @@ def _make_leaf(index: int, url: str = "https://example.com", text: str = "text")
 def _make_state(leaves: list[MerkleLeaf] | None = None) -> MARAState:
     return MARAState(
         query="What are the economic effects of automation?",
+        run_date="2026-03-20",
         config=ResearchConfig(
             hf_token="test-token",
             brave_api_key="x",
@@ -255,12 +256,12 @@ class TestClaimExtractorNode:
         assert messages[1]["role"] == "user"
 
     async def test_system_message_contains_system_prompt(self, mocker):
-        from mara.prompts.claim_extractor import SYSTEM_PROMPT
+        from mara.prompts.claim_extractor import build_system_prompt
         leaf = _make_leaf(0)
         mock_llm = self._mock_llm(mocker, _claims_json())
         await claim_extractor(_make_state([leaf]), config={})
         messages = mock_llm.ainvoke.call_args.args[0]
-        assert messages[0]["content"] == SYSTEM_PROMPT
+        assert messages[0]["content"] == build_system_prompt("2026-03-20")
 
     async def test_user_message_contains_leaf_text(self, mocker):
         leaf = _make_leaf(0, text="unique leaf content xyz")

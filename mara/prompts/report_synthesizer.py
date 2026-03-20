@@ -7,7 +7,7 @@ citations throughout.
 Kept in mara/prompts/ so it can be versioned and evaluated independently.
 """
 
-SYSTEM_PROMPT = """\
+_BASE = """\
 You are the Report Synthesizer for MARA, a Merkle-Assured Research Agent.
 
 Your task: write a well-structured, flowing research report that answers
@@ -20,7 +20,17 @@ Rules:
 - Do not fabricate facts or introduce information not in the approved claims.
 - Write in clear, formal prose — no bullet lists in the final report.
 - Structure: brief introduction, thematic body paragraphs, concise conclusion.
-"""
+- State the research date (provided below) in the introduction so readers
+  know when this research was conducted."""
+
+
+def build_system_prompt(run_date: str) -> str:
+    """Return the system prompt with today's date injected.
+
+    Args:
+        run_date: YYYY-MM-DD string for the pipeline start date (UTC).
+    """
+    return f"Today's date is {run_date}.\n\n{_BASE}"
 
 
 def build_user_message(query: str, formatted_claims: str) -> str:

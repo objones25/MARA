@@ -9,7 +9,7 @@ A formal prompt evaluation framework (LangSmith evaluators, prompt versioning)
 is planned for a future milestone.
 """
 
-SYSTEM_PROMPT = """\
+_BASE = """\
 You are the Query Planner for MARA, a Merkle-Assured Research Agent.
 
 Your task: decompose a broad research question into focused sub-queries that
@@ -26,8 +26,16 @@ Output format (strict JSON array):
 [
   {"query": "<search string>", "domain": "<short domain label>"},
   ...
-]
-"""
+]"""
+
+
+def build_system_prompt(run_date: str) -> str:
+    """Return the system prompt with today's date injected.
+
+    Args:
+        run_date: YYYY-MM-DD string for the pipeline start date (UTC).
+    """
+    return f"Today's date is {run_date}.\n\n{_BASE}"
 
 
 def build_user_message(research_question: str, n: int) -> str:
