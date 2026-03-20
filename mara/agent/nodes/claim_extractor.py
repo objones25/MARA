@@ -27,34 +27,15 @@ Why a single LLM call over all leaves?
 """
 
 import json
-import re
 
-from langchain_huggingface import ChatHuggingFace, HuggingFaceEndpoint
 from langchain_core.runnables import RunnableConfig
 
+from mara.agent.llm import make_llm, strip_think
 from mara.agent.state import Claim, MARAState, MerkleLeaf
 from mara.logging import get_logger
 from mara.prompts.claim_extractor import SYSTEM_PROMPT, build_user_message
 
 _log = get_logger(__name__)
-
-_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
-
-
-def _make_llm(model: str, hf_token: str) -> ChatHuggingFace:
-    """Instantiate the ChatHuggingFace client via HuggingFace Inference Providers."""
-    endpoint = HuggingFaceEndpoint(
-        repo_id=model,
-        task="text-generation",
-        huggingfacehub_api_token=hf_token,
-        max_new_tokens=4096,
-    )
-    return ChatHuggingFace(llm=endpoint)
-
-
-def _strip_think(text: str) -> str:
-    """Strip Qwen3 thinking tokens from LLM output."""
-    return _THINK_RE.sub("", text).strip()
 
 
 def _format_leaves(leaves: list[MerkleLeaf]) -> list[tuple[int, str, str]]:
@@ -86,7 +67,7 @@ def _parse_claims(content: str) -> list[Claim]:
             stripping.
         ValueError: If the parsed JSON is not a list.
     """
-    text = _strip_think(content)
+    text = strip_think(content)
 
     if text.startswith("```"):
         lines = text.splitlines()
@@ -127,7 +108,7 @@ async def claim_extractor(state: MARAState, config: RunnableConfig) -> dict:
     _log.info("Extracting claims from %d leaf/leaves", len(leaves))
 
     research_config = state["config"]
-    llm = _make_llm(research_config.model, research_config.hf_token)
+    llm = make_llm(research_config.model, research_config.hf_token, 4096)
 
     passages = _format_leaves(leaves)
     messages = [

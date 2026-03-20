@@ -16,34 +16,14 @@ Why format citations before the LLM call?
   and structure.
 """
 
-import re
-
-from langchain_huggingface import ChatHuggingFace, HuggingFaceEndpoint
 from langchain_core.runnables import RunnableConfig
 
+from mara.agent.llm import make_llm, strip_think
 from mara.agent.state import MARAState, MerkleLeaf
 from mara.logging import get_logger
 from mara.prompts.report_synthesizer import SYSTEM_PROMPT, build_user_message
 
 _log = get_logger(__name__)
-
-_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
-
-
-def _make_llm(model: str, hf_token: str) -> ChatHuggingFace:
-    """Instantiate the ChatHuggingFace client for report synthesis."""
-    endpoint = HuggingFaceEndpoint(
-        repo_id=model,
-        task="text-generation",
-        huggingfacehub_api_token=hf_token,
-        max_new_tokens=8192,
-    )
-    return ChatHuggingFace(llm=endpoint)
-
-
-def _strip_think(text: str) -> str:
-    """Strip Qwen3 thinking tokens from LLM output."""
-    return _THINK_RE.sub("", text).strip()
 
 
 def _citation(leaf: MerkleLeaf) -> str:
@@ -97,7 +77,7 @@ async def report_synthesizer(state: MARAState, config: RunnableConfig) -> dict:
         return {"report_draft": ""}
 
     research_config = state["config"]
-    llm = _make_llm(research_config.model, research_config.hf_token)
+    llm = make_llm(research_config.model, research_config.hf_token, 8192)
 
     formatted = _format_claims(claims, leaves)
     messages = [
@@ -106,7 +86,7 @@ async def report_synthesizer(state: MARAState, config: RunnableConfig) -> dict:
     ]
 
     response = await llm.ainvoke(messages, config)
-    report_text = _strip_think(response.content)
+    report_text = strip_think(response.content)
 
     _log.info("Report synthesised (%d characters)", len(report_text))
     return {"report_draft": report_text}

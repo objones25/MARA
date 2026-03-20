@@ -4,7 +4,6 @@ All LLM calls are mocked. Tests cover:
   - _format_leaves: pure function, index/url/text extraction
   - _parse_claims: pure function, all branches (clean JSON, fences, empty text
     filtering, source_indices coercion, non-list error, invalid JSON error)
-  - _make_llm: ChatHuggingFace instantiation
   - claim_extractor: async node — empty leaves path, populated path, state
     reading, config forwarding, return shape
 """
@@ -14,7 +13,6 @@ import pytest
 
 from mara.agent.nodes.claim_extractor import (
     _format_leaves,
-    _make_llm,
     _parse_claims,
     claim_extractor,
 )
@@ -202,39 +200,6 @@ class TestParseClaims:
 
 
 # ---------------------------------------------------------------------------
-# _make_llm
-# ---------------------------------------------------------------------------
-
-
-class TestMakeLlm:
-    def test_instantiates_chat_hugging_face(self, mocker):
-        mock_endpoint_cls = mocker.patch("mara.agent.nodes.claim_extractor.HuggingFaceEndpoint")
-        mock_chat_cls = mocker.patch("mara.agent.nodes.claim_extractor.ChatHuggingFace")
-        model = "Qwen/Qwen3-30B-A3B-Instruct"
-        token = "hf-test-token"
-        _make_llm(model, token)
-        mock_endpoint_cls.assert_called_once_with(
-            repo_id=model,
-            task="text-generation",
-            huggingfacehub_api_token=token,
-            max_new_tokens=4096,
-        )
-        mock_chat_cls.assert_called_once_with(llm=mock_endpoint_cls.return_value)
-
-    def test_passes_model(self, mocker):
-        mock_endpoint_cls = mocker.patch("mara.agent.nodes.claim_extractor.HuggingFaceEndpoint")
-        mocker.patch("mara.agent.nodes.claim_extractor.ChatHuggingFace")
-        _make_llm("Qwen/Qwen3-32B-Instruct", "k")
-        assert mock_endpoint_cls.call_args.kwargs["repo_id"] == "Qwen/Qwen3-32B-Instruct"
-
-    def test_max_tokens_is_4096(self, mocker):
-        mock_endpoint_cls = mocker.patch("mara.agent.nodes.claim_extractor.HuggingFaceEndpoint")
-        mocker.patch("mara.agent.nodes.claim_extractor.ChatHuggingFace")
-        _make_llm("m", "k")
-        assert mock_endpoint_cls.call_args.kwargs["max_new_tokens"] == 4096
-
-
-# ---------------------------------------------------------------------------
 # claim_extractor — async node
 # ---------------------------------------------------------------------------
 
@@ -246,7 +211,7 @@ class TestClaimExtractorNode:
             return_value=_mock_llm_response(mocker, content)
         )
         mocker.patch(
-            "mara.agent.nodes.claim_extractor._make_llm",
+            "mara.agent.nodes.claim_extractor.make_llm",
             return_value=mock_llm,
         )
         return mock_llm
@@ -256,7 +221,7 @@ class TestClaimExtractorNode:
         assert result == {"extracted_claims": []}
 
     async def test_empty_leaves_does_not_call_llm(self, mocker):
-        mock_cls = mocker.patch("mara.agent.nodes.claim_extractor._make_llm")
+        mock_cls = mocker.patch("mara.agent.nodes.claim_extractor.make_llm")
         await claim_extractor(_make_state([]), config={})
         mock_cls.assert_not_called()
 
@@ -327,7 +292,7 @@ class TestClaimExtractorNode:
         assert forwarded_config is sentinel_config
 
     async def test_uses_config_model_and_api_key(self, mocker):
-        mock_make_llm = mocker.patch("mara.agent.nodes.claim_extractor._make_llm")
+        mock_make_llm = mocker.patch("mara.agent.nodes.claim_extractor.make_llm")
         mock_llm = mocker.AsyncMock()
         mock_llm.ainvoke = mocker.AsyncMock(
             return_value=_mock_llm_response(mocker, _claims_json())
@@ -338,12 +303,12 @@ class TestClaimExtractorNode:
             hf_token="my-token",
             brave_api_key="x",
             firecrawl_api_key="x",
-            model="Qwen/Qwen3-32B-Instruct",
+            model="Qwen/Qwen3-32B",
         )
         state = _make_state([_make_leaf(0)])
         state["config"] = cfg
         await claim_extractor(state, config={})
-        mock_make_llm.assert_called_once_with("Qwen/Qwen3-32B-Instruct", "my-token")
+        mock_make_llm.assert_called_once_with("Qwen/Qwen3-32B", "my-token", 4096)
 
     async def test_handles_fenced_llm_response(self, mocker):
         leaf = _make_leaf(0)

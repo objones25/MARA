@@ -23,34 +23,15 @@ Why strip markdown fences?
 """
 
 import json
-import re
 
-from langchain_huggingface import ChatHuggingFace, HuggingFaceEndpoint
 from langchain_core.runnables import RunnableConfig
 
+from mara.agent.llm import make_llm, strip_think
 from mara.agent.state import MARAState, SubQuery
 from mara.logging import get_logger
 from mara.prompts.query_planner import SYSTEM_PROMPT, build_user_message
 
 _log = get_logger(__name__)
-
-_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
-
-
-def _make_llm(model: str, hf_token: str) -> ChatHuggingFace:
-    """Instantiate the ChatHuggingFace client via HuggingFace Inference Providers."""
-    endpoint = HuggingFaceEndpoint(
-        repo_id=model,
-        task="text-generation",
-        huggingfacehub_api_token=hf_token,
-        max_new_tokens=1024,
-    )
-    return ChatHuggingFace(llm=endpoint)
-
-
-def _strip_think(text: str) -> str:
-    """Strip Qwen3 thinking tokens from LLM output."""
-    return _THINK_RE.sub("", text).strip()
 
 
 def _parse_sub_queries(content: str, n: int) -> list[SubQuery]:
@@ -71,7 +52,7 @@ def _parse_sub_queries(content: str, n: int) -> list[SubQuery]:
             stripping.
         ValueError: If the parsed JSON is not a list.
     """
-    text = _strip_think(content)
+    text = strip_think(content)
 
     # Strip optional markdown code fences (```json ... ``` or ``` ... ```)
     if text.startswith("```"):
@@ -110,7 +91,7 @@ async def query_planner(state: MARAState, config: RunnableConfig) -> dict:
 
     _log.info("Planning query into %d sub-queries: %r", n, state["query"])
 
-    llm = _make_llm(research_config.model, research_config.hf_token)
+    llm = make_llm(research_config.model, research_config.hf_token, 1024)
 
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},

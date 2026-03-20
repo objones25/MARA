@@ -3,7 +3,6 @@
 All LLM calls are mocked. Tests cover:
   - _citation: format string for a single leaf
   - _format_claims: multi-claim formatting with confidence and citations
-  - _make_llm: ChatHuggingFace instantiation with max_new_tokens=8192
   - report_synthesizer: async node — empty claims path, populated path,
     human_approved_claims vs scored_claims fallback, config forwarding
 """
@@ -14,7 +13,6 @@ from dataclasses import dataclass
 from mara.agent.nodes.report_synthesizer import (
     _citation,
     _format_claims,
-    _make_llm,
     report_synthesizer,
 )
 from mara.agent.state import MARAState, MerkleLeaf
@@ -87,7 +85,7 @@ def _mock_llm(mocker, content: str = "The synthesised report."):
     msg = mocker.MagicMock()
     msg.content = content
     mock_llm.ainvoke = mocker.AsyncMock(return_value=msg)
-    mocker.patch("mara.agent.nodes.report_synthesizer._make_llm", return_value=mock_llm)
+    mocker.patch("mara.agent.nodes.report_synthesizer.make_llm", return_value=mock_llm)
     return mock_llm
 
 
@@ -166,43 +164,18 @@ class TestFormatClaims:
 
 
 # ---------------------------------------------------------------------------
-# _make_llm
-# ---------------------------------------------------------------------------
-
-
-class TestMakeLlm:
-    def test_instantiates_chat_hugging_face(self, mocker):
-        mock_endpoint_cls = mocker.patch("mara.agent.nodes.report_synthesizer.HuggingFaceEndpoint")
-        mock_chat_cls = mocker.patch("mara.agent.nodes.report_synthesizer.ChatHuggingFace")
-        _make_llm("Qwen/Qwen3-30B-A3B-Instruct", "hf-key")
-        mock_endpoint_cls.assert_called_once_with(
-            repo_id="Qwen/Qwen3-30B-A3B-Instruct",
-            task="text-generation",
-            huggingfacehub_api_token="hf-key",
-            max_new_tokens=8192,
-        )
-        mock_chat_cls.assert_called_once_with(llm=mock_endpoint_cls.return_value)
-
-    def test_max_tokens_is_8192(self, mocker):
-        mock_endpoint_cls = mocker.patch("mara.agent.nodes.report_synthesizer.HuggingFaceEndpoint")
-        mocker.patch("mara.agent.nodes.report_synthesizer.ChatHuggingFace")
-        _make_llm("m", "k")
-        assert mock_endpoint_cls.call_args.kwargs["max_new_tokens"] == 8192
-
-
-# ---------------------------------------------------------------------------
 # report_synthesizer — async node
 # ---------------------------------------------------------------------------
 
 
 class TestReportSynthesizerNode:
     async def test_empty_claims_returns_empty_report(self, mocker):
-        mocker.patch("mara.agent.nodes.report_synthesizer._make_llm")
+        mocker.patch("mara.agent.nodes.report_synthesizer.make_llm")
         result = await report_synthesizer(_make_state(), config={})
         assert result == {"report_draft": ""}
 
     async def test_empty_claims_does_not_call_llm(self, mocker):
-        mock_cls = mocker.patch("mara.agent.nodes.report_synthesizer._make_llm")
+        mock_cls = mocker.patch("mara.agent.nodes.report_synthesizer.make_llm")
         await report_synthesizer(_make_state(), config={})
         mock_cls.assert_not_called()
 

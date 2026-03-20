@@ -22,11 +22,10 @@ Why a synchronous LSA callable (not async)?
 """
 
 import asyncio
-import re
 
-from langchain_huggingface import ChatHuggingFace, HuggingFaceEndpoint
 from langchain_core.runnables import RunnableConfig
 
+from mara.agent.llm import ChatHuggingFace, make_llm, strip_think
 from mara.agent.state import MARAState
 from mara.confidence.scorer import score_claim
 from mara.confidence.signals import LSAVerdict
@@ -34,24 +33,6 @@ from mara.logging import get_logger
 from mara.prompts.lsa_scorer import SYSTEM_PROMPT, build_user_message
 
 _log = get_logger(__name__)
-
-_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
-
-
-def _make_llm(model: str, hf_token: str) -> ChatHuggingFace:
-    """Instantiate the ChatHuggingFace client for synchronous LSA calls."""
-    endpoint = HuggingFaceEndpoint(
-        repo_id=model,
-        task="text-generation",
-        huggingfacehub_api_token=hf_token,
-        max_new_tokens=32,
-    )
-    return ChatHuggingFace(llm=endpoint)
-
-
-def _strip_think(text: str) -> str:
-    """Strip Qwen3 thinking tokens from LLM output."""
-    return _THINK_RE.sub("", text).strip()
 
 
 def _call_lsa(
@@ -80,7 +61,7 @@ def _call_lsa(
         {"role": "user", "content": build_user_message(claim_text, source_texts)},
     ]
     response = llm.invoke(messages, config)
-    verdict = _strip_think(response.content).lower()
+    verdict = strip_think(response.content).lower()
     if verdict in ("supported", "partially_supported", "unsupported"):
         return verdict  # type: ignore[return-value]
     return "unsupported"
@@ -104,7 +85,7 @@ async def confidence_scorer(state: MARAState, config: RunnableConfig) -> dict:
 
     _log.info("Scoring %d claims against %d leaves", len(claims), len(leaves))
 
-    llm = _make_llm(research_config.lsa_model, research_config.hf_token)
+    llm = make_llm(research_config.lsa_model, research_config.hf_token, 32)
 
     def lsa_callable(claim_text: str, source_texts: list[str]) -> LSAVerdict:
         return _call_lsa(llm, claim_text, source_texts, config)

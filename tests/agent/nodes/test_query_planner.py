@@ -6,8 +6,7 @@ Test strategy:
   - _parse_sub_queries: pure function, exhaustive branch coverage including
     clean JSON, fenced JSON, non-list responses, missing 'domain' key, and
     truncation to n.
-  - _make_llm: verify it instantiates ChatHuggingFace with the correct params.
-  - query_planner: async node integration — mock _make_llm to inject a fake
+  - query_planner: async node integration — mock make_llm to inject a fake
     LLM, verify the node reads state correctly and returns {"sub_queries": ...}.
 """
 
@@ -15,7 +14,6 @@ import json
 import pytest
 
 from mara.agent.nodes.query_planner import (
-    _make_llm,
     _parse_sub_queries,
     query_planner,
 )
@@ -156,41 +154,6 @@ class TestParseSubQueries:
 
 
 # ---------------------------------------------------------------------------
-# _make_llm
-# ---------------------------------------------------------------------------
-
-
-class TestMakeLlm:
-    def test_returns_chat_hugging_face_instance(self, mocker):
-        mock_endpoint_cls = mocker.patch("mara.agent.nodes.query_planner.HuggingFaceEndpoint")
-        mock_chat_cls = mocker.patch("mara.agent.nodes.query_planner.ChatHuggingFace")
-        model = "Qwen/Qwen3-30B-A3B-Instruct"
-        token = "hf-test-token"
-        _make_llm(model, token)
-        mock_endpoint_cls.assert_called_once_with(
-            repo_id=model,
-            task="text-generation",
-            huggingfacehub_api_token=token,
-            max_new_tokens=1024,
-        )
-        mock_chat_cls.assert_called_once_with(llm=mock_endpoint_cls.return_value)
-
-    def test_passes_model_to_constructor(self, mocker):
-        mock_endpoint_cls = mocker.patch("mara.agent.nodes.query_planner.HuggingFaceEndpoint")
-        mocker.patch("mara.agent.nodes.query_planner.ChatHuggingFace")
-        _make_llm("Qwen/Qwen3-30B-A3B-Instruct", "key")
-        call_kwargs = mock_endpoint_cls.call_args.kwargs
-        assert call_kwargs["repo_id"] == "Qwen/Qwen3-30B-A3B-Instruct"
-
-    def test_passes_api_key_to_constructor(self, mocker):
-        mock_endpoint_cls = mocker.patch("mara.agent.nodes.query_planner.HuggingFaceEndpoint")
-        mocker.patch("mara.agent.nodes.query_planner.ChatHuggingFace")
-        _make_llm("m", "my-api-key")
-        call_kwargs = mock_endpoint_cls.call_args.kwargs
-        assert call_kwargs["huggingfacehub_api_token"] == "my-api-key"
-
-
-# ---------------------------------------------------------------------------
 # query_planner — async node integration
 # ---------------------------------------------------------------------------
 
@@ -203,7 +166,7 @@ class TestQueryPlannerNode:
             return_value=_make_llm_response(mocker, response_content)
         )
         mocker.patch(
-            "mara.agent.nodes.query_planner._make_llm",
+            "mara.agent.nodes.query_planner.make_llm",
             return_value=mock_llm,
         )
         return mock_llm
@@ -227,7 +190,7 @@ class TestQueryPlannerNode:
             assert "domain" in sq
 
     async def test_uses_config_model(self, mocker):
-        mock_make_llm = mocker.patch("mara.agent.nodes.query_planner._make_llm")
+        mock_make_llm = mocker.patch("mara.agent.nodes.query_planner.make_llm")
         mock_llm = mocker.AsyncMock()
         mock_llm.ainvoke = mocker.AsyncMock(
             return_value=_make_llm_response(mocker, _sub_queries_json(3))
@@ -238,14 +201,14 @@ class TestQueryPlannerNode:
             hf_token="my-hf-token",
             brave_api_key="x",
             firecrawl_api_key="x",
-            model="Qwen/Qwen3-30B-A3B-Instruct",
+            model="Qwen/Qwen3-30B-A3B-Instruct-2507",
             max_workers=3,
         )
         await query_planner(_make_state(config=cfg), config={})
-        mock_make_llm.assert_called_once_with("Qwen/Qwen3-30B-A3B-Instruct", "my-hf-token")
+        mock_make_llm.assert_called_once_with("Qwen/Qwen3-30B-A3B-Instruct-2507", "my-hf-token", 1024)
 
     async def test_uses_config_api_key(self, mocker):
-        mock_make_llm = mocker.patch("mara.agent.nodes.query_planner._make_llm")
+        mock_make_llm = mocker.patch("mara.agent.nodes.query_planner.make_llm")
         mock_llm = mocker.AsyncMock()
         mock_llm.ainvoke = mocker.AsyncMock(
             return_value=_make_llm_response(mocker, _sub_queries_json(3))
@@ -259,7 +222,7 @@ class TestQueryPlannerNode:
             max_workers=3,
         )
         await query_planner(_make_state(config=cfg), config={})
-        _, called_api_key = mock_make_llm.call_args.args
+        _, called_api_key, _ = mock_make_llm.call_args.args
         assert called_api_key == "secret-token"
 
     async def test_invokes_llm_with_system_and_user_messages(self, mocker):
