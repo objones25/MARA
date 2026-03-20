@@ -119,37 +119,39 @@ Current mitigations — RAG, chain-of-thought, temperature reduction — reduce 
 The agent is implemented as a directed `StateGraph` in LangGraph. Control flows through ten nodes, some of which fan out into parallel subgraphs using the `Send` API. The Merkle integrity layer is a data structure — not a separate node — that is built incrementally as sources are hashed and committed into the agent state.
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                     MARA StateGraph                     │
-│                                                         │
-│  [Query Planner]                                        │
-│       │                                                 │
-│       ▼                                                 │
-│  [Search Workers ×N] ◄── parallel fan-out via Send()   │
-│       │  (brave_search → firecrawl_scrape per worker)  │
-│       ▼                                                 │
-│  [Source Hasher]  →  [Merkle Builder]                  │
-│                            │                            │
-│                            ▼                            │
-│                    [Retriever]                          │
-│                     BM25 + semantic RRF → top-K leaves  │
-│                            │                            │
-│                            ▼                            │
-│                   [Claim Extractor]                     │
-│                            │                            │
-│                            ▼                            │
-│                  [Confidence Scorer]                    │
-│                            │                            │
-│                            ▼                            │
-│                  [HITL Checkpoint]                      │
-│                   auto-approve high conf;               │
-│                   interrupt() for low conf              │
-│                            │                            │
-│                            ▼                            │
-│                 [Report Synthesizer]                    │
-│                            │                            │
-│                 [Certified Output] ◄── Merkle root      │
-└─────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────┐
+│                        MARA StateGraph                         │
+│                                                                │
+│  [Query Planner]                                               │
+│       │                                                        │
+│       ▼                                                        │
+│  [search_worker ×N] ──┐  parallel fan-out via Send()          │
+│  (brave → firecrawl)  │  one search_worker + one arxiv_worker  │
+│  [arxiv_worker  ×N] ──┘  dispatched per sub-query             │
+│       │  (arxiv_search → firecrawl)                           │
+│       ▼  (fan-in via operator.add on raw_chunks)              │
+│  [Source Hasher]  →  [Merkle Builder]                         │
+│                             │                                  │
+│                             ▼                                  │
+│                     [Retriever]                                │
+│                      BM25 + semantic RRF → top-K leaves        │
+│                             │                                  │
+│                             ▼                                  │
+│                    [Claim Extractor]                           │
+│                             │                                  │
+│                             ▼                                  │
+│                   [Confidence Scorer]                          │
+│                             │                                  │
+│                             ▼                                  │
+│                   [HITL Checkpoint]                            │
+│                    auto-approve high conf;                     │
+│                    interrupt() for low conf                    │
+│                             │                                  │
+│                             ▼                                  │
+│                  [Report Synthesizer]                          │
+│                             │                                  │
+│                  [Certified Output] ◄── Merkle root            │
+└────────────────────────────────────────────────────────────────┘
 ```
 
 LangSmith traces every node invocation, every LLM call, and every routing decision across the entire graph.
@@ -172,31 +174,37 @@ LangSmith traces every node invocation, every LLM call, and every routing decisi
 
 ### 2. Parallel Search Workers
 
-**Role:** Execute retrieval for each sub-query simultaneously. Each worker is a compiled subgraph (`agent/nodes/search_worker/`) with two internal nodes running in sequence:
+**Role:** Execute retrieval for each sub-query simultaneously. For each sub-query, two parallel worker subgraphs are dispatched: a **web worker** (`search_worker`) and an **ArXiv worker** (`arxiv_worker`). Both funnel into the same `firecrawl_scrape` node and fan their chunks back into `MARAState.raw_chunks` via `operator.add`.
+
+**`search_worker` subgraph** (`brave_search → firecrawl_scrape`):
 
 1. **`brave_search`:** Calls the Brave Search API with the sub-query and collects results from all response sections: web results, news, discussions, and FAQ. Each result carries rich metadata — title, description, `extra_snippets` (up to 5 additional page excerpts), `page_age`, and `result_type`. This full result set fans back into `MARAState.search_results` via an `operator.add` reducer, making Brave's metadata available to every downstream node. Note that these results are **not hashed** — see the [Why Brave search results are not hashed](#why-brave-search-results-are-not-hashed) section for the full explanation.
-2. **`firecrawl_scrape`:** Deduplicates the URLs from `search_results` (the same URL may appear in multiple Brave response sections with distinct metadata, but refers to one page) and batch-scrapes each unique URL via Firecrawl, handling JavaScript rendering and anti-bot measures. The full page markdown is split into deterministic fixed-size chunks. These chunks — not Brave's snippets — are what get passed to the Source Hasher and committed to the Merkle tree. See the [Retrieval Strategy](#retrieval-strategy) section for why full-text scraping is required for Merkle hash integrity. The scraped chunks fan back into `MARAState.raw_chunks` via an `operator.add` reducer.
+2. **`firecrawl_scrape`:** Deduplicates the URLs from `search_results` and batch-scrapes each unique URL via Firecrawl, handling JavaScript rendering and anti-bot measures. The full page markdown is split into deterministic fixed-size chunks. These chunks — not Brave's snippets — are what get passed to the Source Hasher and committed to the Merkle tree. Includes a freshness cache check: URLs already in the leaf DB within `leaf_cache_max_age_hours` are served from cache without re-scraping.
 
-A third retrieval strategy — citation graph traversal via Firecrawl's crawl endpoint — is planned but not yet implemented. See `agent/nodes/search_worker/graph.py`.
+**`arxiv_worker` subgraph** (`arxiv_search → firecrawl_scrape`):
+
+1. **`arxiv_search`:** Queries the ArXiv API (`export.arxiv.org/api/query`) with the sub-query and returns up to `arxiv_max_results` papers (default: 5) ranked by relevance. Uses the versioned PDF URL (e.g. `/pdf/2405.01234v2`) as the canonical source URL — versioned PDFs are immutable and satisfy the Merkle reproducibility requirement. The paper abstract is stored in `SearchResult.description` for HITL observability but is **never hashed** (only the full PDF text is committed to the tree).
+2. **`firecrawl_scrape`:** Reuses the same scrape node as the web worker. Firecrawl fetches the full PDF text and splits it into chunks identical to how web pages are handled. This means ArXiv papers receive exactly the same Merkle treatment as any other source — full text committed, hash verifiable.
+
+A citation graph traversal strategy — crawling reference links discovered during scraping — is planned but not yet implemented. See `agent/nodes/search_worker/graph.py`.
 
 **Why run them in parallel?** LLM-based agents spend most of their wall-clock time waiting on I/O — search APIs, scrape requests, LLM inference. Running multiple sub-queries simultaneously collapses this latency dramatically.
 
-**LangGraph pattern used — the `Send` API:** LangGraph's `Send` API enables fan-out by dispatching one `Send` object per sub-query. The parent graph waits for all workers to finish before proceeding.
+**LangGraph pattern used — the `Send` API:** LangGraph's `Send` API enables fan-out by dispatching one `Send` object per sub-query per worker type. Each sub-query produces two `Send` objects — one for `search_worker` and one for `arxiv_worker` — giving `2 × max_workers` concurrent workers per run.
 
 ```python
 # agent/edges/routing.py
 def dispatch_search_workers(state: MARAState) -> list[Send]:
-    return [
-        Send("search_worker", {
-            "sub_query": q,
-            "research_config": state["config"],
-            "search_results": [],
-            "raw_chunks": [],
-        })
-        for q in state["sub_queries"]
-    ]
+    sends = []
+    for q in state["sub_queries"]:
+        payload = {"sub_query": q, "research_config": state["config"],
+                   "search_results": [], "raw_chunks": []}
+        sends.append(Send("search_worker", payload))
+        sends.append(Send("arxiv_worker", payload))
+    return sends
 
-builder.add_conditional_edges("query_planner", dispatch_search_workers, ["search_worker"])
+builder.add_conditional_edges("query_planner", dispatch_search_workers,
+                              ["search_worker", "arxiv_worker"])
 ```
 
 **Subgraph checkpointing:** Each worker subgraph is compiled with `checkpointer=True`, inheriting the parent checkpointer. If a scrape request times out mid-retrieval, LangGraph resumes the worker from `firecrawl_scrape` rather than re-running `brave_search` from scratch.
@@ -239,7 +247,7 @@ class MerkleLeaf(TypedDict):
     contextualized_text: str  # embedding text; equals text until Contextual Retrieval is added
 ```
 
-`contextualized_text` is a forward-compatibility stub: when Anthropic's Contextual Retrieval is implemented (prepending an LLM-generated document-level summary to each chunk), only `source_hasher.py` and the embedding call need to change — the `retriever` node automatically improves without modification.
+`contextualized_text` is a forward-compatibility stub: when Contextual Retrieval is implemented (prepending an LLM-generated document-level summary to each chunk before embedding), only `source_hasher.py` and the embedding call need to change — the `retriever` node automatically improves without modification.
 
 **Why not hash the entire page?** Research agents retrieve _chunks_, not full documents. Hashing the full page would make the leaf hash sensitive to parts of the page the agent never read, and would break the 1:1 relationship between a leaf and the specific text a claim was derived from.
 
@@ -623,7 +631,7 @@ The retrieval pipeline is one of the primary areas for experimentation as the pr
 
 **Worth evaluating next:**
 
-- **Contextual retrieval:** Before embedding each chunk, prepend a short LLM-generated summary of where the chunk sits within the broader document (Anthropic's approach). Improves retrieval precision for long documents where individual chunks lose their referential context. The `contextualized_text` field on `MerkleLeaf` is a forward-compatibility stub designed for this.
+- **Contextual retrieval:** Before embedding each chunk, prepend a short LLM-generated summary of where the chunk sits within the broader document. Improves retrieval precision for long documents where individual chunks lose their referential context. The `contextualized_text` field on `MerkleLeaf` is a forward-compatibility stub designed for this.
 - **HyDE (Hypothetical Document Embeddings):** Instead of embedding the query directly, generate a hypothetical answer to the query and embed that. The hypothesis embedding is often closer in vector space to real answer documents than the raw question embedding is.
 
 Any retrieval improvement must still produce deterministic chunks that can be hashed and committed to the Merkle tree. Retrieval quality improvements affect which chunks are found; the hash commitment records exactly which chunks were used, whatever the strategy.
@@ -894,33 +902,38 @@ The verifier:
 # .env
 BRAVE_API_KEY=...
 FIRECRAWL_API_KEY=...
-MARA_MODEL=claude-sonnet-4-6
+HF_TOKEN=...                    # HuggingFace Hub token (model downloads + inference)
+
+MARA_MODEL=Qwen/Qwen3-30B-A3B-Instruct
+MARA_LSA_MODEL=Qwen/Qwen3-32B-Instruct
 MARA_HIGH_CONFIDENCE_THRESHOLD=0.80
 MARA_CONFIDENCE_WEIGHTS__ALPHA=0.4
 ```
 
-| Parameter                      | Default             | Description                                                       |
-| ------------------------------ | ------------------- | ----------------------------------------------------------------- |
-| `model`                        | `claude-sonnet-4-6` | LLM for planning, synthesis, LSA scoring                          |
-| `embedding_model`              | `all-MiniLM-L6-v2`  | `sentence-transformers` model for retrieval and SA/CSC scoring    |
-| `max_sources`                  | `20`                | Brave results requested per sub-query (Brave API cap: 20/request) |
-| `max_workers`                  | `3`                 | Number of parallel search workers                                 |
-| `max_retrieval_candidates`     | `150`               | Retrieval pool size; reserve for future reranking stage           |
-| `max_claim_sources`            | `50`                | Leaves passed to claim extraction after retrieval (≤ candidates)  |
-| `max_corrective_rag_loops`     | `2`                 | Max corrective RAG retries per low-confidence claim               |
-| `high_confidence_threshold`    | `0.80`              | Composite score above which claims are auto-approved              |
-| `low_confidence_threshold`     | `0.55`              | Composite score below which claims go to HITL                     |
-| `similarity_support_threshold` | `0.72`              | Cosine similarity for a source to "support" a claim               |
-| `confidence_weights.alpha`     | `0.4`               | Weight for source agreement rate (SA)                             |
-| `confidence_weights.beta`      | `0.2`               | Weight for cross-source consistency (CSC)                         |
-| `confidence_weights.gamma`     | `0.4`               | Weight for LLM self-assessment (LSA)                              |
-| `hash_algorithm`               | `sha256`            | Hash function for Merkle leaves (extensible)                      |
-| `chunk_size`                   | `1000`              | Fixed character chunk size for source text splitting              |
-| `chunk_overlap`                | `200`               | Character overlap between consecutive chunks                      |
-| `checkpointer`                 | `memory`            | `memory` or `postgres`                                            |
-| `leaf_db_path`                 | `~/.mara/leaves.db` | Path to the SQLite leaf database (tilde-expanded at open time)    |
-| `leaf_cache_max_age_hours`     | `168.0` (7 days)    | How long a scraped URL's leaves are considered fresh              |
-| `leaf_db_enabled`              | `True`              | Set to `False` to disable all DB reads/writes (CI / unit tests)   |
+| Parameter                      | Default                           | Description                                                              |
+| ------------------------------ | --------------------------------- | ------------------------------------------------------------------------ |
+| `model`                        | `Qwen/Qwen3-30B-A3B-Instruct`     | LLM for query planning, claim extraction, and report synthesis           |
+| `lsa_model`                    | `Qwen/Qwen3-32B-Instruct`         | LLM for LSA scoring — dense model for better structured-output accuracy  |
+| `embedding_model`              | `all-MiniLM-L6-v2`                | `sentence-transformers` model for retrieval and SA/CSC scoring           |
+| `max_sources`                  | `20`                              | Brave results requested per sub-query (Brave API cap: 20/request)        |
+| `max_workers`                  | `3`                               | Number of parallel sub-queries (each spawns one web + one ArXiv worker)  |
+| `arxiv_max_results`            | `5`                               | ArXiv papers fetched per sub-query                                       |
+| `max_retrieval_candidates`     | `150`                             | Retrieval pool size; reserve for future reranking stage                  |
+| `max_claim_sources`            | `50`                              | Leaves passed to claim extraction after retrieval (≤ candidates)         |
+| `max_corrective_rag_loops`     | `2`                               | Max corrective RAG retries per low-confidence claim                      |
+| `high_confidence_threshold`    | `0.80`                            | Composite score above which claims are auto-approved                     |
+| `low_confidence_threshold`     | `0.55`                            | Composite score below which claims go to HITL                            |
+| `similarity_support_threshold` | `0.72`                            | Cosine similarity for a source to "support" a claim                      |
+| `confidence_weights.alpha`     | `0.4`                             | Weight for source agreement rate (SA)                                    |
+| `confidence_weights.beta`      | `0.2`                             | Weight for cross-source consistency (CSC)                                |
+| `confidence_weights.gamma`     | `0.4`                             | Weight for LLM self-assessment (LSA)                                     |
+| `hash_algorithm`               | `sha256`                          | Hash function for Merkle leaves (extensible)                             |
+| `chunk_size`                   | `1000`                            | Fixed character chunk size for source text splitting                     |
+| `chunk_overlap`                | `200`                             | Character overlap between consecutive chunks                             |
+| `checkpointer`                 | `memory`                          | `memory` or `postgres`                                                   |
+| `leaf_db_path`                 | `~/.mara/leaves.db`               | Path to the SQLite leaf database (tilde-expanded at open time)           |
+| `leaf_cache_max_age_hours`     | `168.0` (7 days)                  | How long a scraped URL's leaves are considered fresh                     |
+| `leaf_db_enabled`              | `True`                            | Set to `False` to disable all DB reads/writes (CI / unit tests)          |
 
 ---
 
@@ -933,10 +946,11 @@ mara/
 │   ├── state.py              # MARAState TypedDict and all shared data classes
 │   ├── nodes/
 │   │   ├── query_planner.py      # Sub-query decomposition node
-│   │   ├── search_worker/        # Retrieval subgraph (one per sub-query, dispatched via Send)
-│   │   │   ├── graph.py          #   Subgraph: brave_search → firecrawl_scrape
+│   │   ├── search_worker/        # Retrieval subgraphs (per sub-query, dispatched via Send)
+│   │   │   ├── graph.py          #   Builds search_worker (brave→firecrawl) and arxiv_worker (arxiv→firecrawl)
 │   │   │   ├── brave_search.py   #   Brave Search API → ranked URLs + metadata
-│   │   │   └── firecrawl_scrape.py #   Firecrawl scrape → full page text → chunks (+ freshness cache)
+│   │   │   ├── arxiv_search.py   #   ArXiv API → versioned PDF URLs + abstracts
+│   │   │   └── firecrawl_scrape.py #   Firecrawl scrape → full page/PDF text → chunks (+ freshness cache)
 │   │   ├── source_hasher.py      # SHA-256 hash of each chunk; builds and persists Merkle leaves
 │   │   ├── merkle_builder.py     # Assembles MerkleTree from leaf hashes
 │   │   ├── retriever.py          # Hybrid BM25+semantic RRF retrieval: all leaves → top-K
@@ -1017,19 +1031,20 @@ The `confidence/` module is intentionally decoupled from LangGraph — it contai
 
 Runtime dependencies are declared in `[project.dependencies]`. Test and dev tooling live in `[dependency-groups]` and are never included in the published package.
 
-| Package                 | Role                                                                                                        |
-| ----------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `langgraph>=1.0`        | Agent graph orchestration, checkpointing, HITL                                                              |
-| `langchain>=1.0`        | LLM abstractions, tool calling, structured output                                                           |
-| `langsmith`             | Tracing, evaluation, experiment tracking                                                                    |
-| `sentence-transformers` | Local embeddings via `all-MiniLM-L6-v2` for SA and CSC scoring                                              |
-| `firecrawl-py`          | Full-text page scraping for source extraction and hashing; citation crawl                                   |
-| `httpx`                 | Async HTTP client for direct Brave Search API calls in `search_worker/brave.py` — no wrapper package needed |
-| `pydantic>=2`           | State schema validation and serialisation                                                                   |
-| `pydantic-settings`     | `BaseSettings` for `ResearchConfig`; loads `.env`, validates env vars with type checking                    |
-| `typer`                 | CLI framework for `cli/`; chosen for Pydantic compatibility and clean `--help` output                       |
-| `psycopg[binary]`       | PostgreSQL connection for production checkpointer                                                           |
-| `json`, `hashlib`       | Stdlib — deterministic serialisation and SHA-256 hashing; no extra dependency                               |
+| Package                    | Role                                                                                                        |
+| -------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `langgraph>=0.2`           | Agent graph orchestration, checkpointing, HITL                                                              |
+| `langchain>=0.3`           | LLM abstractions, tool calling, structured output                                                           |
+| `langchain-huggingface`    | `ChatHuggingFace` + `HuggingFaceEndpoint` for Qwen3 inference via HF Inference Providers                   |
+| `langsmith`                | Tracing, evaluation, experiment tracking                                                                    |
+| `sentence-transformers`    | Local embeddings via `all-MiniLM-L6-v2` for SA and CSC scoring                                             |
+| `firecrawl-py`             | Full-text page scraping for source extraction and hashing; citation crawl                                   |
+| `httpx`                    | Async HTTP client for Brave Search API and ArXiv API — no wrapper package needed                            |
+| `pydantic>=2`              | State schema validation and serialisation                                                                   |
+| `pydantic-settings`        | `BaseSettings` for `ResearchConfig`; loads `.env`, validates env vars with type checking                    |
+| `typer`                    | CLI framework for `cli/`; chosen for Pydantic compatibility and clean `--help` output                       |
+| `psycopg[binary]`          | PostgreSQL connection for production checkpointer                                                           |
+| `json`, `hashlib`          | Stdlib — deterministic serialisation and SHA-256 hashing; no extra dependency                               |
 
 **API group** (`uv sync --group api` — planned, required once `api/` is implemented):
 
@@ -1171,9 +1186,9 @@ The module structure is deliberately shaped to make testing tractable:
 
 ### Prerequisites
 
-- Python 3.11+
+- Python 3.13+
 - [uv](https://docs.astral.sh/uv/) (recommended) or pip
-- API keys for Brave Search, Firecrawl, and Anthropic
+- API keys for Brave Search, Firecrawl, and HuggingFace (Pro account recommended for inference credits)
 
 ### Install
 
@@ -1191,11 +1206,13 @@ Create a `.env` file in the project root:
 ```bash
 BRAVE_API_KEY=your_brave_key
 FIRECRAWL_API_KEY=your_firecrawl_key
-ANTHROPIC_API_KEY=your_anthropic_key
+HF_TOKEN=your_huggingface_token      # used for model downloads and inference
 
 # Optional overrides (shown with defaults)
-MARA_MODEL=claude-sonnet-4-6
+MARA_MODEL=Qwen/Qwen3-30B-A3B-Instruct
+MARA_LSA_MODEL=Qwen/Qwen3-32B-Instruct
 MARA_MAX_WORKERS=3
+MARA_ARXIV_MAX_RESULTS=5
 MARA_HIGH_CONFIDENCE_THRESHOLD=0.80
 MARA_LOW_CONFIDENCE_THRESHOLD=0.55
 MARA_MAX_CLAIM_SOURCES=50
@@ -1235,4 +1252,4 @@ open htmlcov/index.html
 
 ---
 
-_MARA is a personal research project exploring the intersection of cryptographic data structures, statistical reasoning, and LLM agent systems. It is not affiliated with Anthropic, LangChain, or any other organisation._
+_MARA is a personal research project exploring the intersection of cryptographic data structures, statistical reasoning, and LLM agent systems. It is not affiliated with HuggingFace, LangChain, or any other organisation._
