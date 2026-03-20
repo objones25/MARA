@@ -17,42 +17,14 @@ from mara.agent.nodes.query_planner import (
     _parse_sub_queries,
     query_planner,
 )
-from mara.agent.state import MARAState, SubQuery
+from mara.agent.state import SubQuery
 from mara.config import ResearchConfig
+from mara.prompts.query_planner import build_system_prompt
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _make_state(
-    query: str = "What are the health effects of ultra-processed food?",
-    config: ResearchConfig | None = None,
-) -> MARAState:
-    cfg = config or ResearchConfig(
-        hf_token="test-token",
-        brave_api_key="x",
-        firecrawl_api_key="x",
-        max_workers=3,
-    )
-    return MARAState(
-        query=query,
-        run_date="2026-03-20",
-        config=cfg,
-        sub_queries=[],
-        search_results=[],
-        raw_chunks=[],
-        merkle_leaves=[],
-        merkle_tree=None,
-        extracted_claims=[],
-        scored_claims=[],
-        human_approved_claims=[],
-        report_draft="",
-        certified_report=None,
-        messages=[],
-        loop_count=0,
-    )
 
 
 def _make_llm_response(mocker, content: str):
@@ -172,25 +144,32 @@ class TestQueryPlannerNode:
         )
         return mock_llm
 
-    async def test_returns_sub_queries_key(self, mocker):
+    async def test_returns_sub_queries_key(self, mocker, make_mara_state):
         self._mock_llm(mocker, _sub_queries_json(3))
-        result = await query_planner(_make_state(), config={})
+        result = await query_planner(
+            make_mara_state(config=ResearchConfig(max_workers=3, leaf_db_enabled=False)),
+            config={},
+        )
         assert "sub_queries" in result
 
-    async def test_sub_queries_count_matches_max_workers(self, mocker):
+    async def test_sub_queries_count_matches_max_workers(self, mocker, make_mara_state):
         self._mock_llm(mocker, _sub_queries_json(3))
-        state = _make_state()
+        cfg = ResearchConfig(max_workers=3, leaf_db_enabled=False)
+        state = make_mara_state(config=cfg)
         result = await query_planner(state, config={})
         assert len(result["sub_queries"]) == state["config"].max_workers
 
-    async def test_sub_queries_are_list_of_sub_query(self, mocker):
+    async def test_sub_queries_are_list_of_sub_query(self, mocker, make_mara_state):
         self._mock_llm(mocker, _sub_queries_json(3))
-        result = await query_planner(_make_state(), config={})
+        result = await query_planner(
+            make_mara_state(config=ResearchConfig(max_workers=3, leaf_db_enabled=False)),
+            config={},
+        )
         for sq in result["sub_queries"]:
             assert "query" in sq
             assert "domain" in sq
 
-    async def test_uses_config_model(self, mocker):
+    async def test_uses_config_model(self, mocker, make_mara_state):
         mock_make_llm = mocker.patch("mara.agent.nodes.query_planner.make_llm")
         mock_llm = mocker.AsyncMock()
         mock_llm.ainvoke = mocker.AsyncMock(
@@ -204,11 +183,12 @@ class TestQueryPlannerNode:
             firecrawl_api_key="x",
             model="Qwen/Qwen3-30B-A3B-Instruct-2507",
             max_workers=3,
+            leaf_db_enabled=False,
         )
-        await query_planner(_make_state(config=cfg), config={})
+        await query_planner(make_mara_state(config=cfg), config={})
         mock_make_llm.assert_called_once_with("Qwen/Qwen3-30B-A3B-Instruct-2507", "my-hf-token", 1024, "featherless-ai")
 
-    async def test_uses_config_api_key(self, mocker):
+    async def test_uses_config_api_key(self, mocker, make_mara_state):
         mock_make_llm = mocker.patch("mara.agent.nodes.query_planner.make_llm")
         mock_llm = mocker.AsyncMock()
         mock_llm.ainvoke = mocker.AsyncMock(
@@ -221,82 +201,74 @@ class TestQueryPlannerNode:
             brave_api_key="x",
             firecrawl_api_key="x",
             max_workers=3,
+            leaf_db_enabled=False,
         )
-        await query_planner(_make_state(config=cfg), config={})
+        await query_planner(make_mara_state(config=cfg), config={})
         _, called_api_key, _, _ = mock_make_llm.call_args.args
         assert called_api_key == "secret-token"
 
-    async def test_invokes_llm_with_system_and_user_messages(self, mocker):
+    async def test_invokes_llm_with_system_and_user_messages(self, mocker, make_mara_state):
         mock_llm = self._mock_llm(mocker, _sub_queries_json(3))
-        await query_planner(_make_state(), config={})
+        await query_planner(
+            make_mara_state(config=ResearchConfig(max_workers=3, leaf_db_enabled=False)),
+            config={},
+        )
         messages = mock_llm.ainvoke.call_args.args[0]
         roles = [m["role"] for m in messages]
         assert roles == ["system", "user"]
 
-    async def test_system_message_contains_system_prompt(self, mocker):
-        from mara.prompts.query_planner import build_system_prompt
+    async def test_system_message_contains_system_prompt(self, mocker, make_mara_state):
         mock_llm = self._mock_llm(mocker, _sub_queries_json(3))
-        await query_planner(_make_state(), config={})
+        await query_planner(
+            make_mara_state(config=ResearchConfig(max_workers=3, leaf_db_enabled=False)),
+            config={},
+        )
         messages = mock_llm.ainvoke.call_args.args[0]
         assert messages[0]["content"] == build_system_prompt("2026-03-20")
 
-    async def test_user_message_contains_research_question(self, mocker):
+    async def test_user_message_contains_research_question(self, mocker, make_mara_state):
         mock_llm = self._mock_llm(mocker, _sub_queries_json(3))
-        state = _make_state(query="effects of sleep deprivation on cognition")
+        state = make_mara_state(
+            query="effects of sleep deprivation on cognition",
+            config=ResearchConfig(max_workers=3, leaf_db_enabled=False),
+        )
         await query_planner(state, config={})
         messages = mock_llm.ainvoke.call_args.args[0]
         assert "effects of sleep deprivation on cognition" in messages[1]["content"]
 
-    async def test_user_message_contains_n(self, mocker):
+    async def test_user_message_contains_n(self, mocker, make_mara_state):
         mock_llm = self._mock_llm(mocker, _sub_queries_json(3))
-        cfg = ResearchConfig(
-            hf_token="k",
-            brave_api_key="x",
-            firecrawl_api_key="x",
-            max_workers=3,
-        )
-        await query_planner(_make_state(config=cfg), config={})
+        cfg = ResearchConfig(max_workers=3, leaf_db_enabled=False)
+        await query_planner(make_mara_state(config=cfg), config={})
         messages = mock_llm.ainvoke.call_args.args[0]
         assert "3" in messages[1]["content"]
 
-    async def test_handles_fenced_llm_response(self, mocker):
+    async def test_handles_fenced_llm_response(self, mocker, make_mara_state):
         fenced = '```json\n' + _sub_queries_json(3) + '\n```'
         self._mock_llm(mocker, fenced)
-        result = await query_planner(_make_state(), config={})
+        result = await query_planner(
+            make_mara_state(config=ResearchConfig(max_workers=3, leaf_db_enabled=False)),
+            config={},
+        )
         assert len(result["sub_queries"]) == 3
 
-    async def test_truncates_to_max_workers_when_llm_over_produces(self, mocker):
+    async def test_truncates_to_max_workers_when_llm_over_produces(self, mocker, make_mara_state):
         self._mock_llm(mocker, _sub_queries_json(5))
-        cfg = ResearchConfig(
-            hf_token="k",
-            brave_api_key="x",
-            firecrawl_api_key="x",
-            max_workers=3,
-        )
-        result = await query_planner(_make_state(config=cfg), config={})
+        cfg = ResearchConfig(max_workers=3, leaf_db_enabled=False)
+        result = await query_planner(make_mara_state(config=cfg), config={})
         assert len(result["sub_queries"]) == 3
 
-    async def test_returns_all_when_llm_under_produces(self, mocker):
+    async def test_returns_all_when_llm_under_produces(self, mocker, make_mara_state):
         self._mock_llm(mocker, _sub_queries_json(2))
-        cfg = ResearchConfig(
-            hf_token="k",
-            brave_api_key="x",
-            firecrawl_api_key="x",
-            max_workers=3,
-        )
-        result = await query_planner(_make_state(config=cfg), config={})
+        cfg = ResearchConfig(max_workers=3, leaf_db_enabled=False)
+        result = await query_planner(make_mara_state(config=cfg), config={})
         assert len(result["sub_queries"]) == 2
 
-    async def test_sub_query_fields_populated_from_llm(self, mocker):
+    async def test_sub_query_fields_populated_from_llm(self, mocker, make_mara_state):
         payload = '[{"query": "processed food inflammation study", "domain": "clinical"}]'
-        cfg = ResearchConfig(
-            hf_token="k",
-            brave_api_key="x",
-            firecrawl_api_key="x",
-            max_workers=1,
-        )
+        cfg = ResearchConfig(max_workers=1, leaf_db_enabled=False)
         self._mock_llm(mocker, payload)
-        result = await query_planner(_make_state(config=cfg), config={})
+        result = await query_planner(make_mara_state(config=cfg), config={})
         sq = result["sub_queries"][0]
         assert sq["query"] == "processed food inflammation study"
         assert sq["domain"] == "clinical"

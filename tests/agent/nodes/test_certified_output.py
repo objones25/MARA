@@ -5,14 +5,11 @@ Tests verify CertifiedReport field population, fallback from
 human_approved_claims to scored_claims, and empty-tree handling.
 """
 
-import pytest
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from mara.agent.nodes.certified_output import certified_output
-from mara.agent.state import CertifiedReport, MARAState, MerkleLeaf
-from mara.config import ResearchConfig
-from mara.merkle.hasher import hash_chunk
+from mara.agent.state import CertifiedReport
 from mara.merkle.tree import build_merkle_tree
 
 
@@ -26,9 +23,6 @@ class _SC:
     text: str
     confidence: float
     source_indices: list
-    sa: float = 0.5
-    csc: float = 0.5
-    lsa: float = 0.5
     similarities: list = None
 
     def __post_init__(self):
@@ -37,174 +31,133 @@ class _SC:
 
 
 # ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def _make_leaf(index: int) -> MerkleLeaf:
-    url = f"https://example.com/{index}"
-    text = f"text {index}"
-    digest = hash_chunk(url, text, "2026-03-19T10:00:00Z", "sha256")
-    return MerkleLeaf(
-        url=url, text=text, retrieved_at="2026-03-19T10:00:00Z",
-        hash=digest, index=index, sub_query="q", contextualized_text=text,
-    )
-
-
-def _make_state(
-    query: str = "test query",
-    report_draft: str = "Report text.",
-    leaves: list | None = None,
-    retrieved: list | None = None,
-    tree=None,
-    scored: list | None = None,
-    human_approved: list | None = None,
-) -> MARAState:
-    return MARAState(
-        query=query,
-        config=ResearchConfig(
-            brave_api_key="x", firecrawl_api_key="x", anthropic_api_key="x",
-        ),
-        sub_queries=[],
-        search_results=[],
-        raw_chunks=[],
-        merkle_leaves=leaves or [],
-        merkle_tree=tree,
-        retrieved_leaves=retrieved or [],
-        extracted_claims=[],
-        scored_claims=scored or [],
-        human_approved_claims=human_approved or [],
-        report_draft=report_draft,
-        certified_report=None,
-        messages=[],
-        loop_count=0,
-    )
-
-
-# ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
 
 
 class TestCertifiedOutputFields:
-    def test_returns_certified_report_key(self):
-        result = certified_output(_make_state(), config={})
+    def test_returns_certified_report_key(self, make_mara_state):
+        result = certified_output(make_mara_state(), config={})
         assert "certified_report" in result
 
-    def test_returns_certified_report_instance(self):
-        result = certified_output(_make_state(), config={})
+    def test_returns_certified_report_instance(self, make_mara_state):
+        result = certified_output(make_mara_state(), config={})
         assert isinstance(result["certified_report"], CertifiedReport)
 
-    def test_query_copied_from_state(self):
-        result = certified_output(_make_state(query="What is X?"), config={})
+    def test_query_copied_from_state(self, make_mara_state):
+        result = certified_output(make_mara_state(query="What is X?"), config={})
         assert result["certified_report"].query == "What is X?"
 
-    def test_report_text_copied_from_report_draft(self):
-        result = certified_output(_make_state(report_draft="The research report."), config={})
+    def test_report_text_copied_from_report_draft(self, make_mara_state):
+        result = certified_output(make_mara_state(report_draft="The research report."), config={})
         assert result["certified_report"].report_text == "The research report."
 
-    def test_leaves_copied_from_state(self):
-        leaves = [_make_leaf(0), _make_leaf(1)]
-        result = certified_output(_make_state(retrieved=leaves), config={})
+    def test_leaves_copied_from_state(self, make_mara_state, make_merkle_leaf):
+        leaves = [make_merkle_leaf(index=0), make_merkle_leaf(index=1)]
+        result = certified_output(make_mara_state(retrieved_leaves=leaves), config={})
         assert len(result["certified_report"].leaves) == 2
 
-    def test_leaves_are_independent_copy(self):
-        leaves = [_make_leaf(0)]
-        result = certified_output(_make_state(retrieved=leaves), config={})
-        # Mutating state leaves should not affect the report
+    def test_leaves_are_independent_copy(self, make_mara_state, make_merkle_leaf):
+        leaves = [make_merkle_leaf(index=0)]
+        result = certified_output(make_mara_state(retrieved_leaves=leaves), config={})
         assert result["certified_report"].leaves is not leaves
 
-    def test_generated_at_is_iso8601(self):
-        result = certified_output(_make_state(), config={})
+    def test_generated_at_is_iso8601(self, make_mara_state):
+        result = certified_output(make_mara_state(), config={})
         ts = result["certified_report"].generated_at
-        # Should be parseable as ISO-8601
         datetime.fromisoformat(ts)
 
-    def test_generated_at_is_recent(self):
+    def test_generated_at_is_recent(self, make_mara_state):
         before = datetime.now(timezone.utc)
-        result = certified_output(_make_state(), config={})
+        result = certified_output(make_mara_state(), config={})
         after = datetime.now(timezone.utc)
         ts = datetime.fromisoformat(result["certified_report"].generated_at)
         assert before <= ts <= after
 
 
 class TestMerkleRoot:
-    def test_merkle_root_from_retrieved_leaves(self):
-        leaves = [_make_leaf(0), _make_leaf(1)]
+    def test_merkle_root_from_retrieved_leaves(self, make_mara_state, make_merkle_leaf):
+        leaves = [make_merkle_leaf(index=0), make_merkle_leaf(index=1, url="https://b.com")]
         expected_root = build_merkle_tree([l["hash"] for l in leaves], "sha256").root
-        result = certified_output(_make_state(retrieved=leaves), config={})
+        result = certified_output(make_mara_state(retrieved_leaves=leaves), config={})
         assert result["certified_report"].merkle_root == expected_root
 
-    def test_merkle_root_independent_of_full_corpus_tree(self):
-        # The corpus tree (merkle_tree in state) is ignored; only retrieved leaves matter.
-        retrieved = [_make_leaf(0)]
-        all_leaves = [_make_leaf(0), _make_leaf(1), _make_leaf(2)]
+    def test_merkle_root_independent_of_full_corpus_tree(self, make_mara_state, make_merkle_leaf):
+        retrieved = [make_merkle_leaf(index=0)]
+        all_leaves = [
+            make_merkle_leaf(index=0),
+            make_merkle_leaf(index=1, url="https://b.com"),
+            make_merkle_leaf(index=2, url="https://c.com"),
+        ]
         corpus_tree = build_merkle_tree([l["hash"] for l in all_leaves], "sha256")
-        result = certified_output(_make_state(leaves=all_leaves, retrieved=retrieved, tree=corpus_tree), config={})
+        result = certified_output(
+            make_mara_state(merkle_leaves=all_leaves, retrieved_leaves=retrieved, merkle_tree=corpus_tree),
+            config={},
+        )
         expected_root = build_merkle_tree([retrieved[0]["hash"]], "sha256").root
         assert result["certified_report"].merkle_root == expected_root
         assert result["certified_report"].merkle_root != corpus_tree.root
 
-    def test_empty_retrieved_leaves_root_is_empty_string(self):
-        result = certified_output(_make_state(retrieved=[]), config={})
+    def test_empty_retrieved_leaves_root_is_empty_string(self, make_mara_state):
+        result = certified_output(make_mara_state(retrieved_leaves=[]), config={})
         assert result["certified_report"].merkle_root == ""
 
-    def test_hash_algorithm_stored_in_report(self):
-        result = certified_output(_make_state(), config={})
+    def test_hash_algorithm_stored_in_report(self, make_mara_state):
+        result = certified_output(make_mara_state(), config={})
         assert result["certified_report"].hash_algorithm == "sha256"
 
 
 class TestClaimsHandling:
-    def test_prefers_human_approved_over_scored(self):
+    def test_prefers_human_approved_over_scored(self, make_mara_state):
         human = [_SC("human claim", 0.70, [])]
         scored = [_SC("scored claim", 0.90, [])]
         result = certified_output(
-            _make_state(scored=scored, human_approved=human), config={}
+            make_mara_state(scored_claims=scored, human_approved_claims=human), config={}
         )
         texts = [c.text for c in result["certified_report"].scored_claims]
         assert "human claim" in texts
         assert "scored claim" not in texts
 
-    def test_falls_back_to_scored_when_human_approved_empty(self):
+    def test_falls_back_to_scored_when_human_approved_empty(self, make_mara_state):
         scored = [_SC("scored claim", 0.90, [])]
-        result = certified_output(_make_state(scored=scored), config={})
+        result = certified_output(make_mara_state(scored_claims=scored), config={})
         texts = [c.text for c in result["certified_report"].scored_claims]
         assert "scored claim" in texts
 
-    def test_empty_claims_produces_empty_list(self):
-        result = certified_output(_make_state(), config={})
+    def test_empty_claims_produces_empty_list(self, make_mara_state):
+        result = certified_output(make_mara_state(), config={})
         assert result["certified_report"].scored_claims == []
 
-    def test_scored_claims_are_independent_copy(self):
+    def test_scored_claims_are_independent_copy(self, make_mara_state):
         scored = [_SC("c", 0.9, [])]
-        result = certified_output(_make_state(scored=scored), config={})
+        result = certified_output(make_mara_state(scored_claims=scored), config={})
         assert result["certified_report"].scored_claims is not scored
 
 
 class TestCertifiedOutputDbIntegration:
     """Verify that certified_output calls leaf_repo.complete_run when injected."""
 
-    def test_complete_run_called_when_repo_and_run_id_injected(self, mocker):
+    def test_complete_run_called_when_repo_and_run_id_injected(self, mocker, make_mara_state):
         repo = mocker.MagicMock()
         config = {"configurable": {"leaf_repo": repo, "run_id": "run-42"}}
-        certified_output(_make_state(), config=config)
+        certified_output(make_mara_state(), config=config)
         repo.complete_run.assert_called_once()
 
-    def test_complete_run_called_with_run_id(self, mocker):
+    def test_complete_run_called_with_run_id(self, mocker, make_mara_state):
         repo = mocker.MagicMock()
         config = {"configurable": {"leaf_repo": repo, "run_id": "run-abc"}}
-        certified_output(_make_state(), config=config)
+        certified_output(make_mara_state(), config=config)
         call_args = repo.complete_run.call_args.args
         assert call_args[0] == "run-abc"
 
-    def test_complete_run_not_called_when_repo_missing(self, mocker):
+    def test_complete_run_not_called_when_repo_missing(self, mocker, make_mara_state):
         repo = mocker.MagicMock()
         config = {"configurable": {"run_id": "run-1"}}
-        certified_output(_make_state(), config=config)
+        certified_output(make_mara_state(), config=config)
         repo.complete_run.assert_not_called()
 
-    def test_complete_run_not_called_when_run_id_missing(self, mocker):
+    def test_complete_run_not_called_when_run_id_missing(self, mocker, make_mara_state):
         repo = mocker.MagicMock()
         config = {"configurable": {"leaf_repo": repo}}
-        certified_output(_make_state(), config=config)
+        certified_output(make_mara_state(), config=config)
         repo.complete_run.assert_not_called()

@@ -23,25 +23,12 @@ from mara.agent.nodes.search_worker.brave_search import (
     _web_results,
     _BRAVE_SEARCH_URL,
 )
-from mara.agent.state import SearchWorkerState, SubQuery
 from mara.config import ResearchConfig
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _make_state(
-    query: str = "renewable energy trends",
-    research_config: ResearchConfig | None = None,
-) -> SearchWorkerState:
-    return SearchWorkerState(
-        sub_query=SubQuery(query=query, domain="energy"),
-        research_config=research_config or ResearchConfig(),
-        search_results=[],
-        raw_chunks=[],
-    )
 
 
 def _mock_http(mocker, json_data: dict, status_error: bool = False):
@@ -217,60 +204,60 @@ class TestFAQResults:
 
 
 class TestBraveSearchRequest:
-    async def test_uses_correct_url(self, mocker):
+    async def test_uses_correct_url(self, mocker, make_search_worker_state):
         mock_client = _mock_http(mocker, {})
-        await brave_search(_make_state(), {})
+        await brave_search(make_search_worker_state(), {})
         assert mock_client.get.call_args.args[0] == _BRAVE_SEARCH_URL
 
-    async def test_query_sent_as_q_param(self, mocker):
+    async def test_query_sent_as_q_param(self, mocker, make_search_worker_state):
         mock_client = _mock_http(mocker, {})
-        await brave_search(_make_state(query="ocean acidification"), {})
+        await brave_search(make_search_worker_state(query="ocean acidification"), {})
         assert mock_client.get.call_args.kwargs["params"]["q"] == "ocean acidification"
 
-    async def test_extra_snippets_always_requested(self, mocker):
+    async def test_extra_snippets_always_requested(self, mocker, make_search_worker_state):
         mock_client = _mock_http(mocker, {})
-        await brave_search(_make_state(), {})
+        await brave_search(make_search_worker_state(), {})
         assert mock_client.get.call_args.kwargs["params"]["extra_snippets"] == "true"
 
-    async def test_count_uses_max_sources_directly(self, mocker):
+    async def test_count_uses_max_sources_directly(self, mocker, make_search_worker_state):
         mock_client = _mock_http(mocker, {})
         config = ResearchConfig(max_sources=15)
-        await brave_search(_make_state(research_config=config), {})
+        await brave_search(make_search_worker_state(config=config), {})
         assert mock_client.get.call_args.kwargs["params"]["count"] == 15
 
-    async def test_count_capped_at_20_by_brave_api_limit(self, mocker):
+    async def test_count_capped_at_20_by_brave_api_limit(self, mocker, make_search_worker_state):
         """Brave hard cap: no matter what max_sources says, count <= 20."""
         mock_client = _mock_http(mocker, {})
         config = ResearchConfig(max_sources=30)
-        await brave_search(_make_state(research_config=config), {})
+        await brave_search(make_search_worker_state(config=config), {})
         assert mock_client.get.call_args.kwargs["params"]["count"] == 20
 
-    async def test_api_key_in_subscription_token_header(self, mocker):
+    async def test_api_key_in_subscription_token_header(self, mocker, make_search_worker_state):
         mock_client = _mock_http(mocker, {})
         config = ResearchConfig(brave_api_key="my-key-abc")
-        await brave_search(_make_state(research_config=config), {})
+        await brave_search(make_search_worker_state(config=config), {})
         assert mock_client.get.call_args.kwargs["headers"]["X-Subscription-Token"] == "my-key-abc"
 
-    async def test_accept_json_header(self, mocker):
+    async def test_accept_json_header(self, mocker, make_search_worker_state):
         mock_client = _mock_http(mocker, {})
-        await brave_search(_make_state(), {})
+        await brave_search(make_search_worker_state(), {})
         assert mock_client.get.call_args.kwargs["headers"]["Accept"] == "application/json"
 
-    async def test_accept_encoding_gzip_header(self, mocker):
+    async def test_accept_encoding_gzip_header(self, mocker, make_search_worker_state):
         mock_client = _mock_http(mocker, {})
-        await brave_search(_make_state(), {})
+        await brave_search(make_search_worker_state(), {})
         assert mock_client.get.call_args.kwargs["headers"]["Accept-Encoding"] == "gzip"
 
-    async def test_freshness_param_sent_when_configured(self, mocker):
+    async def test_freshness_param_sent_when_configured(self, mocker, make_search_worker_state):
         mock_client = _mock_http(mocker, {})
         config = ResearchConfig(brave_freshness="pw")
-        await brave_search(_make_state(research_config=config), {})
+        await brave_search(make_search_worker_state(config=config), {})
         assert mock_client.get.call_args.kwargs["params"]["freshness"] == "pw"
 
-    async def test_freshness_param_absent_when_empty(self, mocker):
+    async def test_freshness_param_absent_when_empty(self, mocker, make_search_worker_state):
         """No freshness param when brave_freshness is '' (default)."""
         mock_client = _mock_http(mocker, {})
-        await brave_search(_make_state(research_config=ResearchConfig(brave_freshness="")), {})
+        await brave_search(make_search_worker_state(config=ResearchConfig(brave_freshness="")), {})
         assert "freshness" not in mock_client.get.call_args.kwargs["params"]
 
 
@@ -280,32 +267,32 @@ class TestBraveSearchRequest:
 
 
 class TestBraveSearchResponse:
-    async def test_returns_dict_with_search_results_key(self, mocker):
+    async def test_returns_dict_with_search_results_key(self, mocker, make_search_worker_state):
         _mock_http(mocker, {})
-        result = await brave_search(_make_state(), {})
+        result = await brave_search(make_search_worker_state(), {})
         assert "search_results" in result
 
-    async def test_collects_web_results(self, mocker):
+    async def test_collects_web_results(self, mocker, make_search_worker_state):
         _mock_http(mocker, {"web": {"results": [{"url": "https://web.com", "title": "Web"}]}})
-        result = await brave_search(_make_state(), {})
+        result = await brave_search(make_search_worker_state(), {})
         assert any(r["url"] == "https://web.com" for r in result["search_results"])
 
-    async def test_collects_news_results(self, mocker):
+    async def test_collects_news_results(self, mocker, make_search_worker_state):
         _mock_http(mocker, {"news": {"results": [{"url": "https://news.com/story", "title": "News"}]}})
-        result = await brave_search(_make_state(), {})
+        result = await brave_search(make_search_worker_state(), {})
         assert any(r["result_type"] == "news" for r in result["search_results"])
 
-    async def test_collects_discussion_results(self, mocker):
+    async def test_collects_discussion_results(self, mocker, make_search_worker_state):
         _mock_http(mocker, {"discussions": {"results": [{"url": "https://reddit.com/post"}]}})
-        result = await brave_search(_make_state(), {})
+        result = await brave_search(make_search_worker_state(), {})
         assert any(r["result_type"] == "discussion" for r in result["search_results"])
 
-    async def test_collects_faq_results(self, mocker):
+    async def test_collects_faq_results(self, mocker, make_search_worker_state):
         _mock_http(mocker, {"faq": {"results": [{"url": "https://faq.com/q", "question": "Why?", "answer": "Because."}]}})
-        result = await brave_search(_make_state(), {})
+        result = await brave_search(make_search_worker_state(), {})
         assert any(r["result_type"] == "faq" for r in result["search_results"])
 
-    async def test_same_url_in_two_sections_produces_two_results(self, mocker):
+    async def test_same_url_in_two_sections_produces_two_results(self, mocker, make_search_worker_state):
         """brave_search must NOT deduplicate.  Both entries carry distinct metadata
         (different result_type, description, extra_snippets) and are preserved.
         URL deduplication is firecrawl_scrape's responsibility."""
@@ -314,32 +301,32 @@ class TestBraveSearchResponse:
             "web": {"results": [{"url": shared_url, "title": "Web entry", "description": "Web desc"}]},
             "news": {"results": [{"url": shared_url, "title": "News entry", "description": "News desc"}]},
         })
-        result = await brave_search(_make_state(), {})
+        result = await brave_search(make_search_worker_state(), {})
         urls = [r["url"] for r in result["search_results"]]
         assert urls.count(shared_url) == 2
 
-    async def test_all_four_sections_combined(self, mocker):
+    async def test_all_four_sections_combined(self, mocker, make_search_worker_state):
         _mock_http(mocker, {
             "web": {"results": [{"url": "https://web.com"}]},
             "news": {"results": [{"url": "https://news.com"}]},
             "discussions": {"results": [{"url": "https://disc.com"}]},
             "faq": {"results": [{"url": "https://faq.com", "question": "Q?", "answer": "A."}]},
         })
-        result = await brave_search(_make_state(), {})
+        result = await brave_search(make_search_worker_state(), {})
         types = {r["result_type"] for r in result["search_results"]}
         assert types == {"web", "news", "discussion", "faq"}
 
-    async def test_empty_response_returns_empty_list(self, mocker):
+    async def test_empty_response_returns_empty_list(self, mocker, make_search_worker_state):
         _mock_http(mocker, {})
-        result = await brave_search(_make_state(), {})
+        result = await brave_search(make_search_worker_state(), {})
         assert result["search_results"] == []
 
-    async def test_raise_for_status_always_called(self, mocker):
+    async def test_raise_for_status_always_called(self, mocker, make_search_worker_state):
         mock_client = _mock_http(mocker, {})
-        await brave_search(_make_state(), {})
+        await brave_search(make_search_worker_state(), {})
         mock_client.get.return_value.raise_for_status.assert_called_once()
 
-    async def test_http_error_propagates(self, mocker):
+    async def test_http_error_propagates(self, mocker, make_search_worker_state):
         _mock_http(mocker, {}, status_error=True)
         with pytest.raises(httpx.HTTPStatusError):
-            await brave_search(_make_state(), {})
+            await brave_search(make_search_worker_state(), {})

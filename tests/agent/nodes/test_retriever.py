@@ -25,7 +25,7 @@ import pytest
 import numpy as np
 
 from mara.agent.nodes.retriever import retriever, _load_or_compute_leaf_embeddings, _rrf_scores
-from mara.agent.state import MARAState, MerkleLeaf, SubQuery
+from mara.agent.state import MerkleLeaf, SubQuery
 from mara.config import ResearchConfig
 from mara.merkle.hasher import hash_chunk
 
@@ -53,36 +53,26 @@ def _make_leaf(
     )
 
 
-def _make_state(
-    leaves: list[MerkleLeaf] | None = None,
-    sub_queries: list[SubQuery] | None = None,
-    query: str = "What are the effects of automation?",
-    max_claim_sources: int = 3,
-    embedding_model: str = "all-MiniLM-L6-v2",
-) -> MARAState:
-    return MARAState(
-        query=query,
-        config=ResearchConfig(
-            brave_api_key="x",
-            firecrawl_api_key="x",
-            anthropic_api_key="x",
-            max_claim_sources=max_claim_sources,
-            embedding_model=embedding_model,
-        ),
-        sub_queries=sub_queries or [],
-        search_results=[],
-        raw_chunks=[],
-        merkle_leaves=leaves or [],
-        merkle_tree=None,
-        retrieved_leaves=[],
-        extracted_claims=[],
-        scored_claims=[],
-        human_approved_claims=[],
-        report_draft="",
-        certified_report=None,
-        messages=[],
-        loop_count=0,
-    )
+@pytest.fixture
+def retriever_state(make_mara_state):
+    def _factory(
+        leaves=None,
+        sub_queries=None,
+        query: str = "What are the effects of automation?",
+        max_claim_sources: int = 3,
+        embedding_model: str = "all-MiniLM-L6-v2",
+    ):
+        return make_mara_state(
+            query=query,
+            merkle_leaves=leaves or [],
+            sub_queries=sub_queries or [],
+            config=ResearchConfig(
+                max_claim_sources=max_claim_sources,
+                embedding_model=embedding_model,
+                leaf_db_enabled=False,
+            ),
+        )
+    return _factory
 
 
 def _mock_embed(texts, model_name, token=""):
@@ -100,15 +90,15 @@ def _mock_embed(texts, model_name, token=""):
 
 
 class TestRetrieverEmptyLeaves:
-    async def test_empty_leaves_returns_empty_dict(self, mocker):
+    async def test_empty_leaves_returns_empty_dict(self, mocker, retriever_state):
         mock_embed = mocker.patch("mara.agent.nodes.retriever.embed")
-        state = _make_state(leaves=[])
+        state = retriever_state(leaves=[])
         result = await retriever(state, config={})
         assert result == {"retrieved_leaves": []}
 
-    async def test_empty_leaves_does_not_call_embed(self, mocker):
+    async def test_empty_leaves_does_not_call_embed(self, mocker, retriever_state):
         mock_embed_fn = mocker.patch("mara.agent.nodes.retriever.embed")
-        state = _make_state(leaves=[])
+        state = retriever_state(leaves=[])
         await retriever(state, config={})
         mock_embed_fn.assert_not_called()
 
@@ -119,38 +109,38 @@ class TestRetrieverEmptyLeaves:
 
 
 class TestRetrieverNoEmbedNeeded:
-    async def test_leaf_count_less_than_k_returns_all(self, mocker):
+    async def test_leaf_count_less_than_k_returns_all(self, mocker, retriever_state):
         mock_embed_fn = mocker.patch("mara.agent.nodes.retriever.embed")
         leaves = [_make_leaf(i) for i in range(2)]
-        state = _make_state(leaves=leaves, max_claim_sources=5)
+        state = retriever_state(leaves=leaves, max_claim_sources=5)
         result = await retriever(state, config={})
         assert len(result["retrieved_leaves"]) == 2
 
-    async def test_leaf_count_less_than_k_no_embed_call(self, mocker):
+    async def test_leaf_count_less_than_k_no_embed_call(self, mocker, retriever_state):
         mock_embed_fn = mocker.patch("mara.agent.nodes.retriever.embed")
         leaves = [_make_leaf(i) for i in range(2)]
-        state = _make_state(leaves=leaves, max_claim_sources=5)
+        state = retriever_state(leaves=leaves, max_claim_sources=5)
         await retriever(state, config={})
         mock_embed_fn.assert_not_called()
 
-    async def test_leaf_count_equal_to_k_returns_all(self, mocker):
+    async def test_leaf_count_equal_to_k_returns_all(self, mocker, retriever_state):
         mock_embed_fn = mocker.patch("mara.agent.nodes.retriever.embed")
         leaves = [_make_leaf(i) for i in range(3)]
-        state = _make_state(leaves=leaves, max_claim_sources=3)
+        state = retriever_state(leaves=leaves, max_claim_sources=3)
         result = await retriever(state, config={})
         assert len(result["retrieved_leaves"]) == 3
 
-    async def test_leaf_count_equal_to_k_no_embed_call(self, mocker):
+    async def test_leaf_count_equal_to_k_no_embed_call(self, mocker, retriever_state):
         mock_embed_fn = mocker.patch("mara.agent.nodes.retriever.embed")
         leaves = [_make_leaf(i) for i in range(3)]
-        state = _make_state(leaves=leaves, max_claim_sources=3)
+        state = retriever_state(leaves=leaves, max_claim_sources=3)
         await retriever(state, config={})
         mock_embed_fn.assert_not_called()
 
-    async def test_returns_retrieved_leaves_key(self, mocker):
+    async def test_returns_retrieved_leaves_key(self, mocker, retriever_state):
         mocker.patch("mara.agent.nodes.retriever.embed")
         leaves = [_make_leaf(0)]
-        state = _make_state(leaves=leaves, max_claim_sources=5)
+        state = retriever_state(leaves=leaves, max_claim_sources=5)
         result = await retriever(state, config={})
         assert "retrieved_leaves" in result
 
@@ -161,51 +151,51 @@ class TestRetrieverNoEmbedNeeded:
 
 
 class TestRetrieverWithEmbedding:
-    async def test_returns_exactly_k_leaves(self, mocker):
+    async def test_returns_exactly_k_leaves(self, mocker, retriever_state):
         mocker.patch("mara.agent.nodes.retriever.embed", side_effect=_mock_embed)
         leaves = [_make_leaf(i, url=f"https://example.com/{i}", text=f"text {i}") for i in range(6)]
-        state = _make_state(leaves=leaves, max_claim_sources=3)
+        state = retriever_state(leaves=leaves, max_claim_sources=3)
         result = await retriever(state, config={})
         assert len(result["retrieved_leaves"]) == 3
 
-    async def test_returns_retrieved_leaves_key(self, mocker):
+    async def test_returns_retrieved_leaves_key(self, mocker, retriever_state):
         mocker.patch("mara.agent.nodes.retriever.embed", side_effect=_mock_embed)
         leaves = [_make_leaf(i) for i in range(5)]
-        state = _make_state(leaves=leaves, max_claim_sources=2)
+        state = retriever_state(leaves=leaves, max_claim_sources=2)
         result = await retriever(state, config={})
         assert "retrieved_leaves" in result
 
-    async def test_retrieved_are_subset_of_merkle_leaves(self, mocker):
+    async def test_retrieved_are_subset_of_merkle_leaves(self, mocker, retriever_state):
         mocker.patch("mara.agent.nodes.retriever.embed", side_effect=_mock_embed)
         leaves = [_make_leaf(i, url=f"https://example.com/{i}", text=f"text {i}") for i in range(6)]
-        state = _make_state(leaves=leaves, max_claim_sources=3)
+        state = retriever_state(leaves=leaves, max_claim_sources=3)
         result = await retriever(state, config={})
         original_indices = {leaf["index"] for leaf in leaves}
         for leaf in result["retrieved_leaves"]:
             assert leaf["index"] in original_indices
 
-    async def test_embed_called_twice(self, mocker):
+    async def test_embed_called_twice(self, mocker, retriever_state):
         mock_embed_fn = mocker.patch("mara.agent.nodes.retriever.embed", side_effect=_mock_embed)
         leaves = [_make_leaf(i) for i in range(5)]
-        state = _make_state(leaves=leaves, max_claim_sources=2)
+        state = retriever_state(leaves=leaves, max_claim_sources=2)
         await retriever(state, config={})
         assert mock_embed_fn.call_count == 2
 
-    async def test_embed_called_with_embedding_model(self, mocker):
+    async def test_embed_called_with_embedding_model(self, mocker, retriever_state):
         mock_embed_fn = mocker.patch("mara.agent.nodes.retriever.embed", side_effect=_mock_embed)
         leaves = [_make_leaf(i) for i in range(5)]
-        state = _make_state(leaves=leaves, max_claim_sources=2, embedding_model="my-model")
+        state = retriever_state(leaves=leaves, max_claim_sources=2, embedding_model="my-model")
         await retriever(state, config={})
         for call in mock_embed_fn.call_args_list:
             assert call.args[1] == "my-model"
 
-    async def test_embed_called_with_leaf_contextualized_texts(self, mocker):
+    async def test_embed_called_with_leaf_contextualized_texts(self, mocker, retriever_state):
         mock_embed_fn = mocker.patch("mara.agent.nodes.retriever.embed", side_effect=_mock_embed)
         leaves = [
             _make_leaf(i, text=f"raw {i}", contextualized_text=f"ctx {i}")
             for i in range(5)
         ]
-        state = _make_state(leaves=leaves, max_claim_sources=2)
+        state = retriever_state(leaves=leaves, max_claim_sources=2)
         await retriever(state, config={})
         # One of the embed calls must have received contextualized texts
         leaf_call_texts = None
@@ -218,13 +208,13 @@ class TestRetrieverWithEmbedding:
         for i in range(5):
             assert f"ctx {i}" in leaf_call_texts
 
-    async def test_embed_not_called_with_raw_texts_when_contextualized_differs(self, mocker):
+    async def test_embed_not_called_with_raw_texts_when_contextualized_differs(self, mocker, retriever_state):
         mock_embed_fn = mocker.patch("mara.agent.nodes.retriever.embed", side_effect=_mock_embed)
         leaves = [
             _make_leaf(i, text=f"raw {i}", contextualized_text=f"ctx {i}")
             for i in range(5)
         ]
-        state = _make_state(leaves=leaves, max_claim_sources=2)
+        state = retriever_state(leaves=leaves, max_claim_sources=2)
         await retriever(state, config={})
         # Verify "raw 0" never appears in leaf embed call
         for call in mock_embed_fn.call_args_list:
@@ -239,7 +229,7 @@ class TestRetrieverWithEmbedding:
 
 
 class TestRetrieverQueryTexts:
-    async def test_no_sub_queries_query_texts_has_one_element(self, mocker):
+    async def test_no_sub_queries_query_texts_has_one_element(self, mocker, retriever_state):
         captured = []
 
         def capturing_embed(texts, model_name, token=""):
@@ -248,13 +238,13 @@ class TestRetrieverQueryTexts:
 
         mocker.patch("mara.agent.nodes.retriever.embed", side_effect=capturing_embed)
         leaves = [_make_leaf(i) for i in range(5)]
-        state = _make_state(leaves=leaves, sub_queries=[], max_claim_sources=2)
+        state = retriever_state(leaves=leaves, sub_queries=[], max_claim_sources=2)
         await retriever(state, config={})
         # The first embed call should be for query_texts (just the main query)
         query_call_texts = captured[0]
         assert len(query_call_texts) == 1
 
-    async def test_sub_queries_included_in_query_texts(self, mocker):
+    async def test_sub_queries_included_in_query_texts(self, mocker, retriever_state):
         captured = []
 
         def capturing_embed(texts, model_name, token=""):
@@ -267,13 +257,13 @@ class TestRetrieverQueryTexts:
             SubQuery(query="sub query one", domain="d1"),
             SubQuery(query="sub query two", domain="d2"),
         ]
-        state = _make_state(leaves=leaves, sub_queries=subs, max_claim_sources=2)
+        state = retriever_state(leaves=leaves, sub_queries=subs, max_claim_sources=2)
         await retriever(state, config={})
         query_call_texts = captured[0]
         assert "sub query one" in query_call_texts
         assert "sub query two" in query_call_texts
 
-    async def test_main_query_is_first_in_query_texts(self, mocker):
+    async def test_main_query_is_first_in_query_texts(self, mocker, retriever_state):
         captured = []
 
         def capturing_embed(texts, model_name, token=""):
@@ -283,7 +273,7 @@ class TestRetrieverQueryTexts:
         mocker.patch("mara.agent.nodes.retriever.embed", side_effect=capturing_embed)
         leaves = [_make_leaf(i) for i in range(5)]
         subs = [SubQuery(query="sub q", domain="d")]
-        state = _make_state(
+        state = retriever_state(
             leaves=leaves,
             sub_queries=subs,
             query="main query text",
@@ -293,7 +283,7 @@ class TestRetrieverQueryTexts:
         query_call_texts = captured[0]
         assert query_call_texts[0] == "main query text"
 
-    async def test_query_texts_count_is_one_plus_num_sub_queries(self, mocker):
+    async def test_query_texts_count_is_one_plus_num_sub_queries(self, mocker, retriever_state):
         captured = []
 
         def capturing_embed(texts, model_name, token=""):
@@ -303,7 +293,7 @@ class TestRetrieverQueryTexts:
         mocker.patch("mara.agent.nodes.retriever.embed", side_effect=capturing_embed)
         leaves = [_make_leaf(i) for i in range(5)]
         subs = [SubQuery(query=f"sub {i}", domain="d") for i in range(3)]
-        state = _make_state(leaves=leaves, sub_queries=subs, max_claim_sources=2)
+        state = retriever_state(leaves=leaves, sub_queries=subs, max_claim_sources=2)
         await retriever(state, config={})
         query_call_texts = captured[0]
         assert len(query_call_texts) == 4  # 1 main + 3 sub
@@ -315,7 +305,7 @@ class TestRetrieverQueryTexts:
 
 
 class TestRetrieverScoring:
-    async def test_highest_scoring_leaf_is_in_result(self, mocker):
+    async def test_highest_scoring_leaf_is_in_result(self, mocker, retriever_state):
         """Arrange embeddings so leaf 0 scores 1.0 against query, rest score 0."""
 
         def biased_embed(texts, model_name, token=""):
@@ -332,15 +322,15 @@ class TestRetrieverScoring:
         # With no sub_queries: query_texts = ["main query"] → emb shape (1, 4) with [1,0,0,0]
         # leaf embs: leaf 0 → [1,0,0,0], others are progressively [0,1,0,0], etc.
         # scores[0] = dot([1,0,0,0], [1,0,0,0]) = 1.0 → highest
-        state = _make_state(leaves=leaves, sub_queries=[], max_claim_sources=2)
+        state = retriever_state(leaves=leaves, sub_queries=[], max_claim_sources=2)
         result = await retriever(state, config={})
         retrieved_indices = {leaf["index"] for leaf in result["retrieved_leaves"]}
         assert 0 in retrieved_indices
 
-    async def test_uses_max_claim_sources_as_k(self, mocker):
+    async def test_uses_max_claim_sources_as_k(self, mocker, retriever_state):
         mocker.patch("mara.agent.nodes.retriever.embed", side_effect=_mock_embed)
         leaves = [_make_leaf(i) for i in range(10)]
-        state = _make_state(leaves=leaves, max_claim_sources=4)
+        state = retriever_state(leaves=leaves, max_claim_sources=4)
         result = await retriever(state, config={})
         assert len(result["retrieved_leaves"]) == 4
 
@@ -629,61 +619,61 @@ class TestRetrieverHybrid:
         repo.bm25_search.return_value = bm25_results or []
         return repo
 
-    async def test_bm25_called_when_repo_present(self, mocker):
+    async def test_bm25_called_when_repo_present(self, mocker, retriever_state):
         mocker.patch("mara.agent.nodes.retriever.embed", side_effect=_mock_embed)
         leaves = [_make_leaf(i) for i in range(5)]
         repo = self._mock_repo(mocker, leaves)
-        state = _make_state(leaves=leaves, max_claim_sources=2)
+        state = retriever_state(leaves=leaves, max_claim_sources=2)
         await retriever(state, config={"configurable": {"leaf_repo": repo, "run_id": "r1"}})
         repo.bm25_search.assert_called_once()
 
-    async def test_bm25_called_with_main_query(self, mocker):
+    async def test_bm25_called_with_main_query(self, mocker, retriever_state):
         mocker.patch("mara.agent.nodes.retriever.embed", side_effect=_mock_embed)
         leaves = [_make_leaf(i) for i in range(5)]
         repo = self._mock_repo(mocker, leaves)
-        state = _make_state(leaves=leaves, max_claim_sources=2, query="my research question")
+        state = retriever_state(leaves=leaves, max_claim_sources=2, query="my research question")
         await retriever(state, config={"configurable": {"leaf_repo": repo, "run_id": "r1"}})
         query_arg = repo.bm25_search.call_args.args[0]
         assert query_arg == "my research question"
 
-    async def test_bm25_called_with_run_id(self, mocker):
+    async def test_bm25_called_with_run_id(self, mocker, retriever_state):
         mocker.patch("mara.agent.nodes.retriever.embed", side_effect=_mock_embed)
         leaves = [_make_leaf(i) for i in range(5)]
         repo = self._mock_repo(mocker, leaves)
-        state = _make_state(leaves=leaves, max_claim_sources=2)
+        state = retriever_state(leaves=leaves, max_claim_sources=2)
         await retriever(state, config={"configurable": {"leaf_repo": repo, "run_id": "my-run"}})
         run_id_arg = repo.bm25_search.call_args.args[1]
         assert run_id_arg == "my-run"
 
-    async def test_bm25_limit_is_leaf_count(self, mocker):
+    async def test_bm25_limit_is_leaf_count(self, mocker, retriever_state):
         mocker.patch("mara.agent.nodes.retriever.embed", side_effect=_mock_embed)
         leaves = [_make_leaf(i) for i in range(7)]
         repo = self._mock_repo(mocker, leaves)
-        state = _make_state(leaves=leaves, max_claim_sources=3)
+        state = retriever_state(leaves=leaves, max_claim_sources=3)
         await retriever(state, config={"configurable": {"leaf_repo": repo, "run_id": "r1"}})
         limit_arg = repo.bm25_search.call_args.args[2]
         assert limit_arg == 7
 
-    async def test_bm25_not_called_when_no_repo(self, mocker):
+    async def test_bm25_not_called_when_no_repo(self, mocker, retriever_state):
         mocker.patch("mara.agent.nodes.retriever.embed", side_effect=_mock_embed)
         leaves = [_make_leaf(i) for i in range(5)]
-        state = _make_state(leaves=leaves, max_claim_sources=2)
+        state = retriever_state(leaves=leaves, max_claim_sources=2)
         # no leaf_repo in config
         result = await retriever(state, config={})
         # Pure semantic path — no bm25 call possible (no repo object)
         assert len(result["retrieved_leaves"]) == 2
 
-    async def test_empty_bm25_results_still_returns_k_leaves(self, mocker):
+    async def test_empty_bm25_results_still_returns_k_leaves(self, mocker, retriever_state):
         mocker.patch("mara.agent.nodes.retriever.embed", side_effect=_mock_embed)
         leaves = [_make_leaf(i) for i in range(5)]
         repo = self._mock_repo(mocker, leaves, bm25_results=[])
-        state = _make_state(leaves=leaves, max_claim_sources=2)
+        state = retriever_state(leaves=leaves, max_claim_sources=2)
         result = await retriever(
             state, config={"configurable": {"leaf_repo": repo, "run_id": "r1"}}
         )
         assert len(result["retrieved_leaves"]) == 2
 
-    async def test_bm25_top_leaf_enters_result_over_pure_semantic(self, mocker):
+    async def test_bm25_top_leaf_enters_result_over_pure_semantic(self, mocker, retriever_state):
         """Leaf with strong BM25 rank but weak semantic rank must appear in RRF top-K.
 
         Setup (5 leaves, k=2):
@@ -714,28 +704,28 @@ class TestRetrieverHybrid:
 
         bm25_result = [_make_leaf_dict(leaves[4])]  # leaf 4 is top BM25
         repo = self._mock_repo(mocker, leaves, bm25_results=bm25_result)
-        state = _make_state(leaves=leaves, sub_queries=[], max_claim_sources=2)
+        state = retriever_state(leaves=leaves, sub_queries=[], max_claim_sources=2)
         result = await retriever(
             state, config={"configurable": {"leaf_repo": repo, "run_id": "r1"}}
         )
         retrieved_hashes = {l["hash"] for l in result["retrieved_leaves"]}
         assert leaves[4]["hash"] in retrieved_hashes  # BM25 champion in top-2
 
-    async def test_k_leaves_returned_in_hybrid_mode(self, mocker):
+    async def test_k_leaves_returned_in_hybrid_mode(self, mocker, retriever_state):
         mocker.patch("mara.agent.nodes.retriever.embed", side_effect=_mock_embed)
         leaves = [_make_leaf(i) for i in range(8)]
         repo = self._mock_repo(mocker, leaves)
-        state = _make_state(leaves=leaves, max_claim_sources=3)
+        state = retriever_state(leaves=leaves, max_claim_sources=3)
         result = await retriever(
             state, config={"configurable": {"leaf_repo": repo, "run_id": "r1"}}
         )
         assert len(result["retrieved_leaves"]) == 3
 
-    async def test_hybrid_result_is_subset_of_merkle_leaves(self, mocker):
+    async def test_hybrid_result_is_subset_of_merkle_leaves(self, mocker, retriever_state):
         mocker.patch("mara.agent.nodes.retriever.embed", side_effect=_mock_embed)
         leaves = [_make_leaf(i) for i in range(6)]
         repo = self._mock_repo(mocker, leaves)
-        state = _make_state(leaves=leaves, max_claim_sources=3)
+        state = retriever_state(leaves=leaves, max_claim_sources=3)
         result = await retriever(
             state, config={"configurable": {"leaf_repo": repo, "run_id": "r1"}}
         )
@@ -743,36 +733,36 @@ class TestRetrieverHybrid:
         for leaf in result["retrieved_leaves"]:
             assert leaf["hash"] in original_hashes
 
-    async def test_run_id_none_still_calls_bm25(self, mocker):
+    async def test_run_id_none_still_calls_bm25(self, mocker, retriever_state):
         """When leaf_repo is present but run_id is absent, bm25_search is called with None."""
         mocker.patch("mara.agent.nodes.retriever.embed", side_effect=_mock_embed)
         leaves = [_make_leaf(i) for i in range(5)]
         repo = self._mock_repo(mocker, leaves)
-        state = _make_state(leaves=leaves, max_claim_sources=2)
+        state = retriever_state(leaves=leaves, max_claim_sources=2)
         # leaf_repo present, run_id absent
         await retriever(state, config={"configurable": {"leaf_repo": repo}})
         run_id_passed = repo.bm25_search.call_args.args[1]
         assert run_id_passed is None
 
-    async def test_embedding_cache_hit_reduces_embed_calls(self, mocker):
+    async def test_embedding_cache_hit_reduces_embed_calls(self, mocker, retriever_state):
         """With all leaves cached, embed is called only once (for queries)."""
         leaves = [_make_leaf(i) for i in range(5)]
         blobs = {leaf["hash"]: _make_blob(4) for leaf in leaves}
         repo = self._mock_repo(mocker, leaves, blobs=blobs)
         mock_embed_fn = mocker.patch("mara.agent.nodes.retriever.embed", side_effect=_mock_embed)
-        state = _make_state(leaves=leaves, max_claim_sources=2)
+        state = retriever_state(leaves=leaves, max_claim_sources=2)
         await retriever(
             state, config={"configurable": {"leaf_repo": repo, "run_id": "r1"}}
         )
         # One call for query embeddings; leaf embeddings served from cache
         assert mock_embed_fn.call_count == 1
 
-    async def test_new_embeddings_stored_in_db(self, mocker):
+    async def test_new_embeddings_stored_in_db(self, mocker, retriever_state):
         """Newly computed leaf embeddings must be written back to the DB."""
         leaves = [_make_leaf(i) for i in range(5)]
         repo = self._mock_repo(mocker, leaves)  # all blobs None → all uncached
         mocker.patch("mara.agent.nodes.retriever.embed", side_effect=_mock_embed)
-        state = _make_state(leaves=leaves, max_claim_sources=2)
+        state = retriever_state(leaves=leaves, max_claim_sources=2)
         await retriever(
             state, config={"configurable": {"leaf_repo": repo, "run_id": "r1"}}
         )

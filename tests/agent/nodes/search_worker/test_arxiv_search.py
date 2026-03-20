@@ -17,8 +17,6 @@ from mara.agent.nodes.search_worker.arxiv_search import (
     _parse_entries,
     _ARXIV_API_URL,
 )
-from mara.agent.state import SearchWorkerState, SubQuery
-from mara.config import ResearchConfig
 
 
 # ---------------------------------------------------------------------------
@@ -131,20 +129,22 @@ _EMPTY_FEED_XML = """\
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Fixtures
 # ---------------------------------------------------------------------------
 
 
-def _make_state(
-    query: str = "neural architecture search",
-    max_results: int = 5,
-) -> SearchWorkerState:
-    return SearchWorkerState(
-        sub_query=SubQuery(query=query, domain="cs"),
-        research_config=ResearchConfig(arxiv_max_results=max_results),
-        search_results=[],
-        raw_chunks=[],
-    )
+@pytest.fixture
+def arxiv_state(make_search_worker_state):
+    from mara.config import ResearchConfig
+
+    def _factory(query="neural architecture search", max_results=5):
+        return make_search_worker_state(
+            query=query,
+            domain="cs",
+            config=ResearchConfig(arxiv_max_results=max_results, leaf_db_enabled=False),
+        )
+
+    return _factory
 
 
 def _mock_http(mocker, xml_text: str, status_error: bool = False):
@@ -244,100 +244,100 @@ class TestParseEntries:
 
 class TestArxivSearchNode:
     @pytest.mark.asyncio
-    async def test_returns_search_results_key(self, mocker):
+    async def test_returns_search_results_key(self, mocker, arxiv_state):
         _mock_http(mocker, _ONE_PAPER_XML)
-        result = await arxiv_search(_make_state(), config={})
+        result = await arxiv_search(arxiv_state(), config={})
         assert "search_results" in result
 
     @pytest.mark.asyncio
-    async def test_calls_arxiv_api(self, mocker):
+    async def test_calls_arxiv_api(self, mocker, arxiv_state):
         mock_client = _mock_http(mocker, _ONE_PAPER_XML)
-        await arxiv_search(_make_state(), config={})
+        await arxiv_search(arxiv_state(), config={})
         mock_client.get.assert_called_once()
         call_args = mock_client.get.call_args
         assert call_args.args[0] == _ARXIV_API_URL
 
     @pytest.mark.asyncio
-    async def test_search_query_uses_all_prefix(self, mocker):
+    async def test_search_query_uses_all_prefix(self, mocker, arxiv_state):
         mock_client = _mock_http(mocker, _ONE_PAPER_XML)
-        await arxiv_search(_make_state(query="neural search"), config={})
+        await arxiv_search(arxiv_state(query="neural search"), config={})
         params = mock_client.get.call_args.kwargs["params"]
         assert params["search_query"] == "all:neural search"
 
     @pytest.mark.asyncio
-    async def test_max_results_from_config(self, mocker):
+    async def test_max_results_from_config(self, mocker, arxiv_state):
         mock_client = _mock_http(mocker, _ONE_PAPER_XML)
-        await arxiv_search(_make_state(max_results=3), config={})
+        await arxiv_search(arxiv_state(max_results=3), config={})
         params = mock_client.get.call_args.kwargs["params"]
         assert params["max_results"] == 3
 
     @pytest.mark.asyncio
-    async def test_sort_by_relevance(self, mocker):
+    async def test_sort_by_relevance(self, mocker, arxiv_state):
         mock_client = _mock_http(mocker, _ONE_PAPER_XML)
-        await arxiv_search(_make_state(), config={})
+        await arxiv_search(arxiv_state(), config={})
         params = mock_client.get.call_args.kwargs["params"]
         assert params["sortBy"] == "relevance"
 
     @pytest.mark.asyncio
-    async def test_result_type_is_arxiv(self, mocker):
+    async def test_result_type_is_arxiv(self, mocker, arxiv_state):
         _mock_http(mocker, _ONE_PAPER_XML)
-        result = await arxiv_search(_make_state(), config={})
+        result = await arxiv_search(arxiv_state(), config={})
         assert result["search_results"][0]["result_type"] == "arxiv"
 
     @pytest.mark.asyncio
-    async def test_result_url_is_pdf_url(self, mocker):
+    async def test_result_url_is_pdf_url(self, mocker, arxiv_state):
         _mock_http(mocker, _ONE_PAPER_XML)
-        result = await arxiv_search(_make_state(), config={})
+        result = await arxiv_search(arxiv_state(), config={})
         assert result["search_results"][0]["url"] == "http://arxiv.org/pdf/2301.07041v1"
 
     @pytest.mark.asyncio
-    async def test_result_title_matches_paper(self, mocker):
+    async def test_result_title_matches_paper(self, mocker, arxiv_state):
         _mock_http(mocker, _ONE_PAPER_XML)
-        result = await arxiv_search(_make_state(), config={})
+        result = await arxiv_search(arxiv_state(), config={})
         assert result["search_results"][0]["title"] == "Advances in Neural Architecture Search"
 
     @pytest.mark.asyncio
-    async def test_result_description_is_abstract(self, mocker):
+    async def test_result_description_is_abstract(self, mocker, arxiv_state):
         _mock_http(mocker, _ONE_PAPER_XML)
-        result = await arxiv_search(_make_state(), config={})
+        result = await arxiv_search(arxiv_state(), config={})
         assert "neural architecture search" in result["search_results"][0]["description"]
 
     @pytest.mark.asyncio
-    async def test_result_page_age_is_published_date(self, mocker):
+    async def test_result_page_age_is_published_date(self, mocker, arxiv_state):
         _mock_http(mocker, _ONE_PAPER_XML)
-        result = await arxiv_search(_make_state(), config={})
+        result = await arxiv_search(arxiv_state(), config={})
         assert result["search_results"][0]["page_age"] == "2023-01-17"
 
     @pytest.mark.asyncio
-    async def test_result_extra_snippets_empty(self, mocker):
+    async def test_result_extra_snippets_empty(self, mocker, arxiv_state):
         _mock_http(mocker, _ONE_PAPER_XML)
-        result = await arxiv_search(_make_state(), config={})
+        result = await arxiv_search(arxiv_state(), config={})
         assert result["search_results"][0]["extra_snippets"] == []
 
     @pytest.mark.asyncio
-    async def test_two_papers_returns_two_results(self, mocker):
+    async def test_two_papers_returns_two_results(self, mocker, arxiv_state):
         _mock_http(mocker, _TWO_PAPERS_XML)
-        result = await arxiv_search(_make_state(), config={})
+        result = await arxiv_search(arxiv_state(), config={})
         assert len(result["search_results"]) == 2
 
     @pytest.mark.asyncio
-    async def test_empty_feed_returns_empty_list(self, mocker):
+    async def test_empty_feed_returns_empty_list(self, mocker, arxiv_state):
         _mock_http(mocker, _EMPTY_FEED_XML)
-        result = await arxiv_search(_make_state(), config={})
+        result = await arxiv_search(arxiv_state(), config={})
         assert result["search_results"] == []
 
     @pytest.mark.asyncio
-    async def test_http_error_returns_empty_results(self, mocker):
+    async def test_http_error_returns_empty_results(self, mocker, arxiv_state):
         _mock_http(mocker, "", status_error=True)
-        result = await arxiv_search(_make_state(), config={})
+        result = await arxiv_search(arxiv_state(), config={})
         assert result == {"search_results": []}
 
     @pytest.mark.asyncio
-    async def test_timeout_returns_empty_results(self, mocker):
+    async def test_timeout_returns_empty_results(self, mocker, arxiv_state):
         mock_client = mocker.AsyncMock()
         mock_client.__aenter__.return_value.get = mocker.AsyncMock(
             side_effect=httpx.ReadTimeout("timed out")
         )
         mocker.patch("mara.agent.nodes.search_worker.arxiv_search.httpx.AsyncClient", return_value=mock_client)
-        result = await arxiv_search(_make_state(), config={})
+        result = await arxiv_search(arxiv_state(), config={})
         assert result == {"search_results": []}
