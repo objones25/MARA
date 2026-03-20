@@ -100,7 +100,10 @@ def hitl_checkpoint(state: MARAState, config: RunnableConfig) -> dict:
             "index": i,
             "text": c.text,
             "confidence": c.confidence,
+            "corroborating": c.corroborating,
+            "n_leaves": c.n_leaves,
             "source_indices": c.source_indices,
+            "contested": c.contested,
         }
         for i, c in enumerate(needs_review)
     ]

@@ -28,6 +28,7 @@ class _SC:
     text: str
     confidence: float
     source_indices: list
+    corroborating: int = 0
     n_leaves: int = 0
     similarities: list = None
     contested: bool = False
@@ -127,7 +128,10 @@ class TestInterruptCalled:
         assert isinstance(item, dict)
         assert "text" in item
         assert "confidence" in item
+        assert "corroborating" in item
+        assert "n_leaves" in item
         assert "source_indices" in item
+        assert "contested" in item
         assert "index" in item
 
     def test_needs_review_item_index_is_position_in_list(self, mocker, make_mara_state):
