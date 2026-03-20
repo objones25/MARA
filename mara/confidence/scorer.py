@@ -1,142 +1,103 @@
-"""Confidence scorer: orchestrates SA, CSC, and LSA into a ScoredClaim.
+"""Confidence scorer: scores a claim via Beta-Binomial Source Agreement.
 
-This module is the top-level entry point for the confidence package. It:
-  1. Embeds the claim and source chunks.
-  2. Computes cosine similarities.
-  3. Delegates to signals.py for SA, CSC, and LSA score computation.
-  4. Returns a ScoredClaim dataclass with all signal values and the composite.
+score_claim embeds the claim against ALL retrieved leaves and applies the
+Beta-Binomial posterior mean as the confidence score.
 
-No LangGraph imports. The LSA LLM call is injected as a callable so this
-module stays pure and testable without a live LLM.
+Why all leaves, not just the cited sources?
+  Each claim is attributed to one leaf by the extractor (n=1 in the
+  Beta-Binomial — informationally useless). Scoring against all retrieved
+  leaves gives a real signal: a claim corroborated by 30/50 leaves is
+  genuinely well-supported; one corroborated by 1/50 is not.
+
+No LangGraph imports. Pure and testable without a live LLM or graph.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Callable
 
 import numpy as np
 
 from mara.confidence.embeddings import embed
-from mara.confidence.signals import (
-    LSAVerdict,
-    compute_composite,
-    compute_csc,
-    compute_sa,
-    lsa_verdict_to_score,
-)
+from mara.confidence.signals import compute_sa
 from mara.config import ResearchConfig
 
 
 @dataclass
 class ScoredClaim:
-    """A factual claim with all confidence signals and the composite score.
+    """A factual claim with its Beta-Binomial confidence score.
 
     Attributes:
         text:           The atomic claim text.
-        source_indices: Indices into the MerkleLeaf list used for scoring.
-        sa:             Source Agreement Rate (Beta-Binomial posterior mean).
-        csc:            Cross-Source Consistency (1 − CV among supporters).
-        lsa:            LLM Self-Assessment score (0.0 / 0.5 / 1.0).
-        confidence:     Composite weighted score.
+        source_indices: Indices of the leaves the claim extractor cited.
+        confidence:     Beta-Binomial posterior mean over all retrieved leaves.
+        corroborating:  k — leaves whose similarity exceeds the threshold.
+        n_leaves:       N — total leaves evaluated.
         similarities:   Raw cosine similarities (for diagnostics / HITL display).
     """
 
     text: str
     source_indices: list[int]
-    sa: float
-    csc: float
-    lsa: float
     confidence: float
+    corroborating: int
+    n_leaves: int
     similarities: list[float] = field(default_factory=list)
 
 
 def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
     """Compute cosine similarity between two pre-normalized unit vectors.
 
-    Because embed() uses normalize_embeddings=True the vectors already have
-    unit norm, so np.dot is equivalent to cosine similarity. np.dot on
-    float32 ndarrays is orders of magnitude faster than a Python-loop sum
-    for the 384-dim all-MiniLM-L6-v2 vectors.
+    embed() uses normalize_embeddings=True so np.dot equals cosine similarity.
     """
     return float(np.dot(a, b))
 
 
 def score_claim(
     claim_text: str,
-    source_texts: list[str],
+    all_leaf_texts: list[str],
     source_indices: list[int],
-    lsa_callable: Callable[[str, list[str]], LSAVerdict],
     config: ResearchConfig,
 ) -> ScoredClaim:
-    """Score a single atomic claim against a list of source texts.
+    """Score a single claim against all retrieved leaves.
 
-    All scoring parameters (embedding model, support threshold, confidence
-    weights) are read from config so there is a single source of truth.
+    Embeds the claim and all leaf texts, computes cosine similarities, then
+    applies the Beta-Binomial posterior mean as the confidence score.
 
     Args:
         claim_text:     The claim to score.
-        source_texts:   List of source chunk texts to score against.
-        source_indices: Corresponding Merkle leaf indices for each source text.
-        lsa_callable:   Function(claim_text, source_texts) → LSAVerdict.
-                        Injected to keep this module testable without a live LLM.
-        config:         ResearchConfig instance driving all scoring parameters.
+        all_leaf_texts: ALL retrieved leaf texts (not just cited sources).
+        source_indices: Leaf indices the claim extractor attributed the claim to.
+        config:         ResearchConfig driving embedding model and threshold.
 
     Returns:
-        A fully populated ScoredClaim.
-
-    Raises:
-        ValueError: If source_texts and source_indices have different lengths.
+        A ScoredClaim with confidence in the open interval (0, 1).
     """
-    if len(source_texts) != len(source_indices):
-        raise ValueError(
-            f"source_texts length ({len(source_texts)}) must equal "
-            f"source_indices length ({len(source_indices)})"
-        )
-
-    w = config.confidence_weights
     threshold = config.similarity_support_threshold
 
-    if not source_texts:
-        # Delegate to signals so the degenerate-case logic lives in one place.
-        # compute_sa([]) → Beta(1,1) prior mean = 0.5
-        # compute_csc([]) → "not enough data" sentinel = 0.5
-        sa = compute_sa([], threshold)
-        csc = compute_csc([], threshold)
-        lsa_verdict = lsa_callable(claim_text, [])
-        lsa = lsa_verdict_to_score(lsa_verdict)
-        composite = compute_composite(sa=sa, csc=csc, lsa=lsa, alpha=w.alpha, beta=w.beta, gamma=w.gamma)
+    if not all_leaf_texts:
         return ScoredClaim(
             text=claim_text,
-            source_indices=[],
-            sa=sa,
-            csc=csc,
-            lsa=lsa,
-            confidence=composite,
+            source_indices=source_indices,
+            confidence=compute_sa([], threshold),  # Beta(1,1) prior = 0.5
+            corroborating=0,
+            n_leaves=0,
             similarities=[],
         )
 
-    # Embed claim + all sources in one batch for efficiency
-    all_embeddings = embed([claim_text] + source_texts, config.embedding_model, config.hf_token)
+    all_embeddings = embed([claim_text] + all_leaf_texts, config.embedding_model, config.hf_token)
     claim_embedding = all_embeddings[0]
-    source_embeddings = all_embeddings[1:]
+    leaf_embeddings = all_embeddings[1:]
 
-    similarities = [cosine_similarity(claim_embedding, s) for s in source_embeddings]
-
-    sa = compute_sa(similarities, threshold)
-    csc = compute_csc(similarities, threshold)
-
-    lsa_verdict = lsa_callable(claim_text, source_texts)
-    lsa = lsa_verdict_to_score(lsa_verdict)
-
-    composite = compute_composite(sa=sa, csc=csc, lsa=lsa, alpha=w.alpha, beta=w.beta, gamma=w.gamma)
+    similarities = [cosine_similarity(claim_embedding, le) for le in leaf_embeddings]
+    n = len(similarities)
+    k = sum(1 for s in similarities if s > threshold)
+    confidence = compute_sa(similarities, threshold)
 
     return ScoredClaim(
         text=claim_text,
         source_indices=source_indices,
-        sa=sa,
-        csc=csc,
-        lsa=lsa,
-        confidence=composite,
+        confidence=confidence,
+        corroborating=k,
+        n_leaves=n,
         similarities=similarities,
     )

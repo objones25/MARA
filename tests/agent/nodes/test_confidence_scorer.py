@@ -1,19 +1,16 @@
 """Tests for mara.agent.nodes.confidence_scorer.
 
-All LLM calls are mocked. Tests cover:
-  - _call_lsa: verdict normalisation, unknown-verdict fallback, whitespace handling
-  - confidence_scorer: end-to-end with mocked make_llm and asyncio.to_thread,
-    empty claims list, source index resolution from retrieved_leaves, return shape
+All embedding calls are mocked — no real model inference is made.
+Tests cover: empty claims, return shape, correct leaf texts passed to
+score_claim, confidence values, and per-claim corroborating/n_leaves fields.
 """
 
-import asyncio
 import pytest
+import numpy as np
 
-from mara.agent.nodes.confidence_scorer import (
-    _call_lsa,
-    confidence_scorer,
-)
+from mara.agent.nodes.confidence_scorer import confidence_scorer
 from mara.agent.state import Claim, MARAState, MerkleLeaf
+from mara.confidence.scorer import ScoredClaim
 from mara.config import ResearchConfig
 from mara.merkle.hasher import hash_chunk
 
@@ -47,7 +44,6 @@ def _make_state(
             firecrawl_api_key="x",
             hf_token="test-token",
             model="Qwen/Qwen3-30B-A3B-Instruct-2507",
-            lsa_model="Qwen/Qwen3-32B",
         ),
         sub_queries=[],
         search_results=[],
@@ -65,182 +61,116 @@ def _make_state(
     )
 
 
-def _mock_lsa_response(mocker, verdict: str):
-    """Return a mock ChatHuggingFace response with the given verdict as content."""
-    mock_resp = mocker.MagicMock()
-    mock_resp.content = verdict
-    return mock_resp
+def _mock_embed(mocker, n_texts: int, dim: int = 4):
+    """Patch embed() to return random unit vectors of shape (n_texts, dim)."""
+    vecs = np.random.rand(n_texts, dim).astype(np.float32)
+    # L2-normalize each row
+    norms = np.linalg.norm(vecs, axis=1, keepdims=True)
+    vecs = vecs / norms
+    mock = mocker.patch(
+        "mara.confidence.scorer.embed",
+        return_value=vecs,
+    )
+    return mock
 
 
 # ---------------------------------------------------------------------------
-# _call_lsa
-# ---------------------------------------------------------------------------
-
-
-class TestCallLsa:
-    def _mock_llm(self, mocker, verdict: str):
-        mock_llm = mocker.MagicMock()
-        mock_llm.invoke.return_value = _mock_lsa_response(mocker, verdict)
-        return mock_llm
-
-    def test_returns_supported(self, mocker):
-        llm = self._mock_llm(mocker, "supported")
-        assert _call_lsa(llm, "claim", ["source"]) == "supported"
-
-    def test_returns_partially_supported(self, mocker):
-        llm = self._mock_llm(mocker, "partially_supported")
-        assert _call_lsa(llm, "claim", ["source"]) == "partially_supported"
-
-    def test_returns_unsupported(self, mocker):
-        llm = self._mock_llm(mocker, "unsupported")
-        assert _call_lsa(llm, "claim", ["source"]) == "unsupported"
-
-    def test_unknown_verdict_defaults_to_unsupported(self, mocker):
-        llm = self._mock_llm(mocker, "i am confused")
-        assert _call_lsa(llm, "claim", ["source"]) == "unsupported"
-
-    def test_strips_whitespace_from_verdict(self, mocker):
-        llm = self._mock_llm(mocker, "  supported  \n")
-        assert _call_lsa(llm, "claim", []) == "supported"
-
-    def test_case_insensitive_normalisation(self, mocker):
-        llm = self._mock_llm(mocker, "SUPPORTED")
-        assert _call_lsa(llm, "claim", []) == "supported"
-
-    def test_invokes_llm_with_system_and_user_messages(self, mocker):
-        llm = self._mock_llm(mocker, "supported")
-        _call_lsa(llm, "my claim", ["passage one"])
-        messages = llm.invoke.call_args.args[0]
-        assert messages[0]["role"] == "system"
-        assert messages[1]["role"] == "user"
-
-    def test_user_message_contains_claim(self, mocker):
-        llm = self._mock_llm(mocker, "supported")
-        _call_lsa(llm, "the sky is blue", ["some source"])
-        messages = llm.invoke.call_args.args[0]
-        assert "the sky is blue" in messages[1]["content"]
-
-    def test_user_message_contains_source_text(self, mocker):
-        llm = self._mock_llm(mocker, "unsupported")
-        _call_lsa(llm, "claim", ["unique passage xyz"])
-        messages = llm.invoke.call_args.args[0]
-        assert "unique passage xyz" in messages[1]["content"]
-
-    def test_empty_sources_handled(self, mocker):
-        llm = self._mock_llm(mocker, "unsupported")
-        result = _call_lsa(llm, "claim", [])
-        assert result == "unsupported"
-
-
-# ---------------------------------------------------------------------------
-# confidence_scorer — async node
+# confidence_scorer node
 # ---------------------------------------------------------------------------
 
 
 class TestConfidenceScorerNode:
-    def _mock_llm_factory(self, mocker, verdict: str = "supported"):
-        """Patch _make_llm to return a fake LLM that always returns verdict."""
-        mock_llm = mocker.MagicMock()
-        mock_llm.invoke.return_value = _mock_lsa_response(mocker, verdict)
-        mocker.patch(
-            "mara.agent.nodes.confidence_scorer.make_llm",
-            return_value=mock_llm,
-        )
-        return mock_llm
-
     async def test_empty_claims_returns_empty_scored(self, mocker):
-        self._mock_llm_factory(mocker)
         result = await confidence_scorer(_make_state(claims=[], leaves=[]), config={})
         assert result == {"scored_claims": []}
 
     async def test_returns_scored_claims_key(self, mocker):
-        self._mock_llm_factory(mocker)
         leaf = _make_leaf("https://a.com", "text", 0)
         claim = Claim(text="some claim", source_indices=[0])
+        # 1 claim + 1 leaf = 2 texts → 2 embeddings
+        _mock_embed(mocker, n_texts=2)
         result = await confidence_scorer(_make_state([claim], [leaf]), config={})
         assert "scored_claims" in result
 
     async def test_one_claim_produces_one_scored_claim(self, mocker):
-        self._mock_llm_factory(mocker)
         leaf = _make_leaf("https://a.com", "supporting text", 0)
         claim = Claim(text="test claim", source_indices=[0])
+        _mock_embed(mocker, n_texts=2)
         result = await confidence_scorer(_make_state([claim], [leaf]), config={})
         assert len(result["scored_claims"]) == 1
 
     async def test_multiple_claims_produce_multiple_scored_claims(self, mocker):
-        self._mock_llm_factory(mocker)
         leaves = [_make_leaf(f"https://a.com/{i}", f"text {i}", i) for i in range(3)]
         claims = [Claim(text=f"claim {i}", source_indices=[i]) for i in range(3)]
+        # Each call: 1 claim + 3 leaves = 4 embeddings
+        mock_embed = mocker.patch("mara.confidence.scorer.embed")
+        mock_embed.side_effect = [
+            np.eye(4, dtype=np.float32)[:4],  # call 1
+            np.eye(4, dtype=np.float32)[:4],  # call 2
+            np.eye(4, dtype=np.float32)[:4],  # call 3
+        ]
         result = await confidence_scorer(_make_state(claims, leaves), config={})
         assert len(result["scored_claims"]) == 3
 
     async def test_scored_claim_has_text(self, mocker):
-        self._mock_llm_factory(mocker)
         leaf = _make_leaf("https://a.com", "text", 0)
         claim = Claim(text="verifiable claim", source_indices=[0])
+        _mock_embed(mocker, n_texts=2)
         result = await confidence_scorer(_make_state([claim], [leaf]), config={})
         assert result["scored_claims"][0].text == "verifiable claim"
 
-    async def test_scored_claim_has_confidence_in_range(self, mocker):
-        self._mock_llm_factory(mocker, verdict="supported")
-        leaf = _make_leaf("https://a.com", "supporting evidence text", 0)
-        claim = Claim(text="a well supported claim", source_indices=[0])
+    async def test_scored_claim_confidence_in_open_interval(self, mocker):
+        leaf = _make_leaf("https://a.com", "text", 0)
+        claim = Claim(text="a claim", source_indices=[0])
+        _mock_embed(mocker, n_texts=2)
         result = await confidence_scorer(_make_state([claim], [leaf]), config={})
         score = result["scored_claims"][0].confidence
-        assert 0.0 <= score <= 1.0
+        assert 0.0 < score < 1.0
 
-    async def test_source_texts_resolved_from_leaf_indices(self, mocker):
-        mock_llm = self._mock_llm_factory(mocker, "supported")
+    async def test_scored_claim_has_corroborating_field(self, mocker):
+        leaf = _make_leaf("https://a.com", "text", 0)
+        claim = Claim(text="a claim", source_indices=[0])
+        _mock_embed(mocker, n_texts=2)
+        result = await confidence_scorer(_make_state([claim], [leaf]), config={})
+        sc = result["scored_claims"][0]
+        assert hasattr(sc, "corroborating")
+        assert isinstance(sc.corroborating, int)
+
+    async def test_scored_claim_n_leaves_matches_retrieved(self, mocker):
+        leaves = [_make_leaf(f"https://a.com/{i}", f"text {i}", i) for i in range(5)]
+        claim = Claim(text="a claim", source_indices=[0])
+        _mock_embed(mocker, n_texts=6)  # 1 claim + 5 leaves
+        result = await confidence_scorer(_make_state([claim], leaves), config={})
+        assert result["scored_claims"][0].n_leaves == 5
+
+    async def test_all_leaf_texts_passed_to_embed(self, mocker):
         leaves = [
             _make_leaf("https://a.com/0", "text zero", 0),
             _make_leaf("https://a.com/1", "text one", 1),
-            _make_leaf("https://a.com/2", "text two", 2),
         ]
-        # Claim references indices 0 and 2 only
-        claim = Claim(text="my claim", source_indices=[0, 2])
+        claim = Claim(text="my claim", source_indices=[0])
+        mock_embed = mocker.patch(
+            "mara.confidence.scorer.embed",
+            return_value=np.eye(4, 4, dtype=np.float32)[:3],
+        )
         await confidence_scorer(_make_state([claim], leaves), config={})
-        # Check that the LLM received source texts from indices 0 and 2
-        user_msg = mock_llm.invoke.call_args.args[0][1]["content"]
-        assert "text zero" in user_msg
-        assert "text two" in user_msg
-        assert "text one" not in user_msg
-
-    async def test_uses_lsa_model_and_hf_token(self, mocker):
-        mock_make_llm = mocker.patch("mara.agent.nodes.confidence_scorer.make_llm")
-        mock_llm = mocker.MagicMock()
-        mock_llm.invoke.return_value = _mock_lsa_response(mocker, "supported")
-        mock_make_llm.return_value = mock_llm
-
-        cfg = ResearchConfig(
-            hf_token="my-hf-token",
-            brave_api_key="x",
-            firecrawl_api_key="x",
-            model="Qwen/Qwen3-30B-A3B-Instruct-2507",
-            lsa_model="Qwen/Qwen3-32B",
-        )
-        state = MARAState(
-            query="q",
-            config=cfg,
-            sub_queries=[],
-            search_results=[],
-            raw_chunks=[],
-            merkle_leaves=[],
-            merkle_tree=None,
-            retrieved_leaves=[],
-            extracted_claims=[],
-            scored_claims=[],
-            human_approved_claims=[],
-            report_draft="",
-            certified_report=None,
-            messages=[],
-            loop_count=0,
-        )
-        await confidence_scorer(state, config={})
-        mock_make_llm.assert_called_once_with("Qwen/Qwen3-32B", "my-hf-token", 32, "featherless-ai")
+        call_texts = mock_embed.call_args.args[0]
+        # First text is the claim; remaining are all leaf texts
+        assert call_texts[0] == "my claim"
+        assert "text zero" in call_texts
+        assert "text one" in call_texts
 
     async def test_claim_with_no_sources_still_scores(self, mocker):
-        self._mock_llm_factory(mocker, "unsupported")
+        """A claim with source_indices=[] scores against all leaves anyway."""
+        leaf = _make_leaf("https://a.com", "text", 0)
         claim = Claim(text="orphan claim", source_indices=[])
-        result = await confidence_scorer(_make_state([claim], []), config={})
+        _mock_embed(mocker, n_texts=2)
+        result = await confidence_scorer(_make_state([claim], [leaf]), config={})
         assert len(result["scored_claims"]) == 1
-        assert 0.0 <= result["scored_claims"][0].confidence <= 1.0
+        assert 0.0 < result["scored_claims"][0].confidence < 1.0
+
+    async def test_no_leaves_yields_prior_mean(self, mocker):
+        """With no leaves, confidence = Beta(1,1) prior mean = 0.5."""
+        claim = Claim(text="a claim", source_indices=[])
+        result = await confidence_scorer(_make_state([claim], []), config={})
+        assert result["scored_claims"][0].confidence == pytest.approx(0.5)

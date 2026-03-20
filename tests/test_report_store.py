@@ -48,10 +48,9 @@ def _make_claim(text: str = "Test claim.", confidence: float = 0.85) -> ScoredCl
     return ScoredClaim(
         text=text,
         source_indices=[0, 1],
-        sa=0.9,
-        csc=0.8,
-        lsa=0.8,
         confidence=confidence,
+        corroborating=2,
+        n_leaves=10,
         similarities=[0.85, 0.80],
     )
 
@@ -114,7 +113,7 @@ class TestReportToDict:
     def test_scored_claim_fields_present(self):
         d = report_to_dict(_make_report())
         claim = d["scored_claims"][0]
-        for key in ("text", "source_indices", "sa", "csc", "lsa", "confidence", "similarities"):
+        for key in ("text", "source_indices", "confidence", "corroborating", "n_leaves", "similarities"):
             assert key in claim
 
     def test_is_json_serializable(self):

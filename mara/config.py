@@ -1,25 +1,5 @@
-from pydantic import BaseModel, Field, model_validator
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
-
-
-class ConfidenceWeights(BaseModel):
-    """Weights for the three confidence signals. Must sum to 1.0.
-
-    Loaded as a nested model via MARA_CONFIDENCE_WEIGHTS__ALPHA etc.
-    Sub-models must inherit BaseModel (not BaseSettings) when populated
-    through the parent's env_nested_delimiter. See pydantic-settings docs.
-    """
-
-    alpha: float = Field(default=0.4, ge=0.0, le=1.0, description="Weight for source agreement rate (SA)")
-    beta: float = Field(default=0.2, ge=0.0, le=1.0, description="Weight for cross-source consistency (CSC)")
-    gamma: float = Field(default=0.4, ge=0.0, le=1.0, description="Weight for LLM self-assessment (LSA)")
-
-    @model_validator(mode="after")
-    def weights_sum_to_one(self) -> "ConfidenceWeights":
-        total = self.alpha + self.beta + self.gamma
-        if abs(total - 1.0) > 1e-9:
-            raise ValueError(f"Confidence weights must sum to 1.0, got {total}")
-        return self
 
 
 class ResearchConfig(BaseSettings):
@@ -47,7 +27,6 @@ class ResearchConfig(BaseSettings):
 
     # LLM / embedding
     model: str = "Qwen/Qwen3-30B-A3B-Instruct-2507"
-    lsa_model: str = Field(default="Qwen/Qwen3-32B", description="Model used for LLM Self-Assessment (LSA) scoring; Qwen3-32B offers better structured-output reliability.")
     embedding_model: str = "all-MiniLM-L6-v2"
 
     # Retrieval
@@ -69,9 +48,6 @@ class ResearchConfig(BaseSettings):
     max_corrective_rag_loops: int = Field(default=2, ge=0)
     max_retrieval_candidates: int = Field(default=150, gt=0, description="Retrieval pool size; fed into reranker once implemented")
     max_claim_sources: int = Field(default=50, gt=0, description="Leaves passed to claim extraction after retrieval (and eventual reranking)")
-
-    # Confidence weights (nested — populated via MARA_CONFIDENCE_WEIGHTS__*)
-    confidence_weights: ConfidenceWeights = Field(default_factory=ConfidenceWeights)
 
     # Cryptography
     hash_algorithm: str = "sha256"

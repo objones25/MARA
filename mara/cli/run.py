@@ -222,7 +222,6 @@ def info() -> None:
     config = ResearchConfig()
     typer.echo("MARA Configuration")
     typer.echo(f"  Model:                {config.model}")
-    typer.echo(f"  LSA model:            {config.lsa_model}")
     typer.echo(f"  Embedding model:      {config.embedding_model}")
     typer.echo(f"  HF provider:          {config.hf_provider}")
     typer.echo(f"  Max workers:          {config.max_workers}")

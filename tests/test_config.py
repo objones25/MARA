@@ -1,41 +1,9 @@
-"""Tests for mara.config — ResearchConfig and ConfidenceWeights validators."""
+"""Tests for mara.config — ResearchConfig validators."""
 
 import pytest
 from pydantic import ValidationError
 
-from mara.config import ConfidenceWeights, ResearchConfig
-
-
-# ---------------------------------------------------------------------------
-# ConfidenceWeights
-# ---------------------------------------------------------------------------
-
-class TestConfidenceWeights:
-    def test_defaults_sum_to_one(self):
-        w = ConfidenceWeights()
-        assert abs(w.alpha + w.beta + w.gamma - 1.0) < 1e-9
-
-    def test_custom_valid_weights(self):
-        w = ConfidenceWeights(alpha=0.5, beta=0.3, gamma=0.2)
-        assert w.alpha == 0.5
-        assert w.beta == 0.3
-        assert w.gamma == 0.2
-
-    def test_weights_not_summing_to_one_raises(self):
-        with pytest.raises(ValidationError, match="sum to 1.0"):
-            ConfidenceWeights(alpha=0.5, beta=0.5, gamma=0.5)
-
-    def test_negative_weight_raises(self):
-        with pytest.raises(ValidationError):
-            ConfidenceWeights(alpha=-0.1, beta=0.6, gamma=0.5)
-
-    def test_weight_above_one_raises(self):
-        with pytest.raises(ValidationError):
-            ConfidenceWeights(alpha=1.1, beta=0.0, gamma=0.0)
-
-    def test_zero_weight_allowed_if_sum_is_one(self):
-        w = ConfidenceWeights(alpha=1.0, beta=0.0, gamma=0.0)
-        assert w.alpha == 1.0
+from mara.config import ResearchConfig
 
 
 # ---------------------------------------------------------------------------
