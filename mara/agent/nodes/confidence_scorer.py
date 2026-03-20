@@ -62,5 +62,23 @@ async def confidence_scorer(state: MARAState, config: RunnableConfig) -> dict:
         )
         scored.append(result)
 
+    if scored:
+        all_sims = [s for c in scored for s in c.similarities]
+        if all_sims:
+            all_sims_sorted = sorted(all_sims)
+            n = len(all_sims_sorted)
+            p25 = all_sims_sorted[n // 4]
+            p50 = all_sims_sorted[n // 2]
+            p75 = all_sims_sorted[(3 * n) // 4]
+            _log.info(
+                "Similarity distribution — min: %.3f  p25: %.3f  p50: %.3f  p75: %.3f  max: %.3f  (threshold: %.2f)",
+                all_sims_sorted[0],
+                p25,
+                p50,
+                p75,
+                all_sims_sorted[-1],
+                research_config.similarity_support_threshold,
+            )
+
     _log.info("Scored %d claims", len(scored))
     return {"scored_claims": scored}
