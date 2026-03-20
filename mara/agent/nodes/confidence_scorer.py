@@ -85,7 +85,7 @@ async def confidence_scorer(state: MARAState, config: RunnableConfig) -> dict:
 
     _log.info("Scoring %d claims against %d leaves", len(claims), len(leaves))
 
-    llm = make_llm(research_config.lsa_model, research_config.hf_token, 32)
+    llm = make_llm(research_config.lsa_model, research_config.hf_token, 32, research_config.hf_provider)
 
     def lsa_callable(claim_text: str, source_texts: list[str]) -> LSAVerdict:
         return _call_lsa(llm, claim_text, source_texts, config)

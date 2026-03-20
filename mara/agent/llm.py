@@ -19,13 +19,16 @@ __all__ = ["ChatHuggingFace", "make_llm", "strip_think"]
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 
 
-def make_llm(model: str, hf_token: str, max_new_tokens: int) -> ChatHuggingFace:
+def make_llm(model: str, hf_token: str, max_new_tokens: int, provider: str = "featherless-ai") -> ChatHuggingFace:
     """Instantiate a ChatHuggingFace client via HuggingFace Inference Providers.
 
     Args:
         model:          HuggingFace model repo ID.
         hf_token:       HuggingFace Hub API token.
         max_new_tokens: Token budget for the completion.
+        provider:       HF inference provider name. Defaults to "featherless-ai".
+                        Use "auto" to delegate to the HF conversational router, but
+                        note the router only covers a limited model catalog.
 
     Returns:
         A ``ChatHuggingFace`` instance ready for ``.invoke()`` or ``.ainvoke()``.
@@ -35,7 +38,7 @@ def make_llm(model: str, hf_token: str, max_new_tokens: int) -> ChatHuggingFace:
         task="text-generation",
         huggingfacehub_api_token=hf_token,
         max_new_tokens=max_new_tokens,
-        provider="auto",
+        provider=provider,
     )
     return ChatHuggingFace(llm=endpoint)
 

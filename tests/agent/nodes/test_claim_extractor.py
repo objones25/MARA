@@ -308,7 +308,7 @@ class TestClaimExtractorNode:
         state = _make_state([_make_leaf(0)])
         state["config"] = cfg
         await claim_extractor(state, config={})
-        mock_make_llm.assert_called_once_with("Qwen/Qwen3-32B", "my-token", 4096)
+        mock_make_llm.assert_called_once_with("Qwen/Qwen3-32B", "my-token", 4096, "featherless-ai")
 
     async def test_handles_fenced_llm_response(self, mocker):
         leaf = _make_leaf(0)

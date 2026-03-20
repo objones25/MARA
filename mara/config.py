@@ -36,6 +36,14 @@ class ResearchConfig(BaseSettings):
     brave_api_key: str = Field(default="", alias="BRAVE_API_KEY")
     firecrawl_api_key: str = Field(default="", alias="FIRECRAWL_API_KEY")
     hf_token: str = Field(default="", alias="HF_TOKEN", description="HuggingFace Hub token for authenticated model downloads.")
+    hf_provider: str = Field(
+        default="featherless-ai",
+        description=(
+            "HuggingFace Inference Provider to use (e.g. 'featherless-ai', 'groq', 'novita'). "
+            "Use 'auto' to let HF pick from your enabled providers via the conversational router, "
+            "but note the router only supports a limited model catalog."
+        ),
+    )
 
     # LLM / embedding
     model: str = "Qwen/Qwen3-30B-A3B-Instruct-2507"

@@ -23,7 +23,7 @@ class TestMakeLlm:
             task="text-generation",
             huggingfacehub_api_token="hf-token",
             max_new_tokens=1024,
-            provider="auto",
+            provider="featherless-ai",
         )
         mock_chat_cls.assert_called_once_with(llm=mock_endpoint_cls.return_value)
 
@@ -45,11 +45,17 @@ class TestMakeLlm:
         make_llm("m", "k", 4096)
         assert mock_endpoint_cls.call_args.kwargs["max_new_tokens"] == 4096
 
-    def test_passes_provider_auto(self, mocker):
+    def test_passes_provider_featherless_ai_by_default(self, mocker):
         mock_endpoint_cls = mocker.patch("mara.agent.llm.HuggingFaceEndpoint")
         mocker.patch("mara.agent.llm.ChatHuggingFace")
         make_llm("m", "k", 512)
-        assert mock_endpoint_cls.call_args.kwargs["provider"] == "auto"
+        assert mock_endpoint_cls.call_args.kwargs["provider"] == "featherless-ai"
+
+    def test_passes_custom_provider(self, mocker):
+        mock_endpoint_cls = mocker.patch("mara.agent.llm.HuggingFaceEndpoint")
+        mocker.patch("mara.agent.llm.ChatHuggingFace")
+        make_llm("m", "k", 512, "groq")
+        assert mock_endpoint_cls.call_args.kwargs["provider"] == "groq"
 
     def test_task_is_text_generation(self, mocker):
         mock_endpoint_cls = mocker.patch("mara.agent.llm.HuggingFaceEndpoint")

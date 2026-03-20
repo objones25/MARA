@@ -108,7 +108,7 @@ async def claim_extractor(state: MARAState, config: RunnableConfig) -> dict:
     _log.info("Extracting claims from %d leaf/leaves", len(leaves))
 
     research_config = state["config"]
-    llm = make_llm(research_config.model, research_config.hf_token, 4096)
+    llm = make_llm(research_config.model, research_config.hf_token, 4096, research_config.hf_provider)
 
     passages = _format_leaves(leaves)
     messages = [

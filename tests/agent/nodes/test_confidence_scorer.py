@@ -236,7 +236,7 @@ class TestConfidenceScorerNode:
             loop_count=0,
         )
         await confidence_scorer(state, config={})
-        mock_make_llm.assert_called_once_with("Qwen/Qwen3-32B", "my-hf-token", 32)
+        mock_make_llm.assert_called_once_with("Qwen/Qwen3-32B", "my-hf-token", 32, "featherless-ai")
 
     async def test_claim_with_no_sources_still_scores(self, mocker):
         self._mock_llm_factory(mocker, "unsupported")

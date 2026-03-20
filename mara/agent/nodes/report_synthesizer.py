@@ -77,7 +77,7 @@ async def report_synthesizer(state: MARAState, config: RunnableConfig) -> dict:
         return {"report_draft": ""}
 
     research_config = state["config"]
-    llm = make_llm(research_config.model, research_config.hf_token, 8192)
+    llm = make_llm(research_config.model, research_config.hf_token, 8192, research_config.hf_provider)
 
     formatted = _format_claims(claims, leaves)
     messages = [
