@@ -49,7 +49,7 @@ async def confidence_scorer(state: MARAState, config: RunnableConfig) -> dict:
 
     _log.info("Scoring %d claims against %d leaves", len(claims), len(leaves))
 
-    all_leaf_texts = [leaf["text"] for leaf in leaves]
+    all_leaf_texts = [leaf["contextualized_text"] for leaf in leaves]
 
     scored = []
     for claim in claims:
