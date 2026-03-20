@@ -38,8 +38,8 @@ class ResearchConfig(BaseSettings):
     hf_token: str = Field(default="", alias="HF_TOKEN", description="HuggingFace Hub token for authenticated model downloads.")
 
     # LLM / embedding
-    model: str = "Qwen/Qwen3-30B-A3B-Instruct"
-    lsa_model: str = Field(default="Qwen/Qwen3-32B-Instruct", description="Model used for LLM Self-Assessment (LSA) scoring; Qwen3-32B offers better structured-output reliability.")
+    model: str = "Qwen/Qwen3-30B-A3B-Instruct-2507"
+    lsa_model: str = Field(default="Qwen/Qwen3-32B", description="Model used for LLM Self-Assessment (LSA) scoring; Qwen3-32B offers better structured-output reliability.")
     embedding_model: str = "all-MiniLM-L6-v2"
 
     # Retrieval

@@ -45,7 +45,7 @@ class TestConfidenceWeights:
 class TestResearchConfigValidators:
     def test_defaults_are_valid(self):
         config = ResearchConfig()
-        assert config.model == "Qwen/Qwen3-30B-A3B-Instruct"
+        assert config.model == "Qwen/Qwen3-30B-A3B-Instruct-2507"
 
     def test_low_threshold_above_high_raises(self):
         with pytest.raises(ValidationError, match="low_confidence_threshold"):
