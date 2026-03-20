@@ -466,3 +466,73 @@ class TestFtsTriggers:
             "SELECT COUNT(*) AS n FROM leaves_fts WHERE leaves_fts MATCH 'photosynthesis'"
         ).fetchone()
         assert row["n"] == 0
+
+
+# ---------------------------------------------------------------------------
+# FTS5 query sanitization
+# ---------------------------------------------------------------------------
+
+
+class TestSanitizeFts5:
+    """Unit tests for _sanitize_fts5 — the natural-language → FTS5 converter."""
+
+    def test_plain_query_unchanged(self):
+        from mara.db.sqlite_repository import _sanitize_fts5
+        assert _sanitize_fts5("machine learning") == "machine learning"
+
+    def test_hyphens_replaced_with_spaces(self):
+        from mara.db.sqlite_repository import _sanitize_fts5
+        result = _sanitize_fts5("state-of-the-art")
+        assert "-" not in result
+        assert "state" in result
+
+    def test_question_mark_removed(self):
+        from mara.db.sqlite_repository import _sanitize_fts5
+        result = _sanitize_fts5("What is RAG?")
+        assert "?" not in result
+        assert "What" in result
+
+    def test_colon_removed(self):
+        from mara.db.sqlite_repository import _sanitize_fts5
+        result = _sanitize_fts5("title:neural")
+        assert ":" not in result
+
+    def test_reserved_word_and_removed(self):
+        from mara.db.sqlite_repository import _sanitize_fts5
+        result = _sanitize_fts5("neural AND networks")
+        assert "AND" not in result.split()
+
+    def test_reserved_word_or_removed(self):
+        from mara.db.sqlite_repository import _sanitize_fts5
+        result = _sanitize_fts5("neural OR networks")
+        assert "OR" not in result.split()
+
+    def test_reserved_word_not_removed(self):
+        from mara.db.sqlite_repository import _sanitize_fts5
+        result = _sanitize_fts5("NOT retrieval")
+        assert "NOT" not in result.split()
+
+    def test_reserved_words_case_insensitive(self):
+        from mara.db.sqlite_repository import _sanitize_fts5
+        result = _sanitize_fts5("and OR not")
+        tokens = result.split()
+        assert not any(t.upper() in ("AND", "OR", "NOT") for t in tokens)
+
+    def test_empty_query_returns_star(self):
+        from mara.db.sqlite_repository import _sanitize_fts5
+        assert _sanitize_fts5("") == "*"
+
+    def test_all_special_chars_returns_star(self):
+        from mara.db.sqlite_repository import _sanitize_fts5
+        assert _sanitize_fts5("AND OR NOT") == "*"
+
+    def test_real_world_query_does_not_raise(self, repo):
+        """The query that crashed in production should not raise OperationalError."""
+        leaf = _make_leaf(hash_="h1", text="retrieval augmented generation survey")
+        leaf["contextualized_text"] = "retrieval augmented generation survey"
+        repo.upsert_leaves([leaf])
+        # This exact query caused OperationalError: no such column: of
+        result = repo.bm25_search(
+            "What are the current state-of-the-art approaches to retrieval augmented generation?"
+        )
+        assert isinstance(result, list)

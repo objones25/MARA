@@ -85,7 +85,7 @@ def _make_state(
     )
 
 
-def _mock_embed(texts, model_name):
+def _mock_embed(texts, model_name, token=""):
     """Identity-like embeddings: text i gets e_i (up to 4 dims)."""
     n = len(texts)
     embs = np.zeros((n, 4))
@@ -242,7 +242,7 @@ class TestRetrieverQueryTexts:
     async def test_no_sub_queries_query_texts_has_one_element(self, mocker):
         captured = []
 
-        def capturing_embed(texts, model_name):
+        def capturing_embed(texts, model_name, token=""):
             captured.append(texts)
             return _mock_embed(texts, model_name)
 
@@ -257,7 +257,7 @@ class TestRetrieverQueryTexts:
     async def test_sub_queries_included_in_query_texts(self, mocker):
         captured = []
 
-        def capturing_embed(texts, model_name):
+        def capturing_embed(texts, model_name, token=""):
             captured.append(texts)
             return _mock_embed(texts, model_name)
 
@@ -276,7 +276,7 @@ class TestRetrieverQueryTexts:
     async def test_main_query_is_first_in_query_texts(self, mocker):
         captured = []
 
-        def capturing_embed(texts, model_name):
+        def capturing_embed(texts, model_name, token=""):
             captured.append(texts)
             return _mock_embed(texts, model_name)
 
@@ -296,7 +296,7 @@ class TestRetrieverQueryTexts:
     async def test_query_texts_count_is_one_plus_num_sub_queries(self, mocker):
         captured = []
 
-        def capturing_embed(texts, model_name):
+        def capturing_embed(texts, model_name, token=""):
             captured.append(texts)
             return _mock_embed(texts, model_name)
 
@@ -318,7 +318,7 @@ class TestRetrieverScoring:
     async def test_highest_scoring_leaf_is_in_result(self, mocker):
         """Arrange embeddings so leaf 0 scores 1.0 against query, rest score 0."""
 
-        def biased_embed(texts, model_name):
+        def biased_embed(texts, model_name, token=""):
             n = len(texts)
             embs = np.zeros((n, 4))
             # We'll make query_texts = ["main query"] → emb[0] = [1, 0, 0, 0]
@@ -522,7 +522,7 @@ class TestLoadOrComputeLeafEmbeddings:
 
         embedded_texts = []
 
-        def capturing_embed(texts, model_name):
+        def capturing_embed(texts, model_name, token=""):
             embedded_texts.extend(texts)
             return _mock_embed(texts, model_name)
 
@@ -565,7 +565,7 @@ class TestLoadOrComputeLeafEmbeddings:
 
         embedded_texts = []
 
-        def capturing_embed(texts, model_name):
+        def capturing_embed(texts, model_name, token=""):
             embedded_texts.extend(texts)
             return _mock_embed(texts, model_name)
 
@@ -587,7 +587,7 @@ class TestLoadOrComputeLeafEmbeddings:
 
         embedded_texts = []
 
-        def capturing_embed(texts, model_name):
+        def capturing_embed(texts, model_name, token=""):
             embedded_texts.extend(texts)
             return _mock_embed(texts, model_name)
 
@@ -695,7 +695,7 @@ class TestRetrieverHybrid:
         """
         leaves = [_make_leaf(i, url=f"https://example.com/{i}", text=f"text {i}") for i in range(5)]
 
-        def biased_embed(texts, model_name):
+        def biased_embed(texts, model_name, token=""):
             n = len(texts)
             embs = np.zeros((n, 4))
             # query embed: text[0] → [1, 0, 0, 0]

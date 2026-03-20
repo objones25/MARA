@@ -63,6 +63,7 @@ async def _load_or_compute_leaf_embeddings(
     model_name: str,
     target_dim: int,
     leaf_repo,
+    hf_token: str = "",
 ) -> np.ndarray:
     """Return a ``(len(leaves), target_dim)`` float32 embedding matrix.
 
@@ -84,7 +85,7 @@ async def _load_or_compute_leaf_embeddings(
     leaf_texts = [leaf["contextualized_text"] for leaf in leaves]
 
     if leaf_repo is None:
-        return await asyncio.to_thread(embed, leaf_texts, model_name)
+        return await asyncio.to_thread(embed, leaf_texts, model_name, hf_token)
 
     hashes = [leaf["hash"] for leaf in leaves]
     cached_blobs = leaf_repo.get_embeddings_for_hashes(hashes)
@@ -122,7 +123,7 @@ async def _load_or_compute_leaf_embeddings(
         to_embed_texts.append(leaf_texts[i])
 
     if to_embed_texts:
-        new_embs: np.ndarray = await asyncio.to_thread(embed, to_embed_texts, model_name)
+        new_embs: np.ndarray = await asyncio.to_thread(embed, to_embed_texts, model_name, hf_token)
         new_blobs: dict[str, bytes] = {}
         for j, idx in enumerate(to_embed_indices):
             h = leaves[idx]["hash"]
@@ -222,12 +223,13 @@ async def retriever(state: MARAState, config: RunnableConfig) -> dict:
 
     # Query embeddings are always computed fresh.  Computing them first
     # establishes target_dim for the embedding cache dimension check.
-    query_embs = await asyncio.to_thread(embed, query_texts, model_name)
+    hf_token = research_config.hf_token
+    query_embs = await asyncio.to_thread(embed, query_texts, model_name, hf_token)
     target_dim = query_embs.shape[1]
 
     # Leaf embeddings: load from cache where possible, compute the rest.
     leaf_embs = await _load_or_compute_leaf_embeddings(
-        leaves, model_name, target_dim, leaf_repo
+        leaves, model_name, target_dim, leaf_repo, hf_token
     )
 
     # Semantic scores: max cosine similarity across all query texts.

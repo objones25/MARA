@@ -117,7 +117,7 @@ def score_claim(
         )
 
     # Embed claim + all sources in one batch for efficiency
-    all_embeddings = embed([claim_text] + source_texts, config.embedding_model)
+    all_embeddings = embed([claim_text] + source_texts, config.embedding_model, config.hf_token)
     claim_embedding = all_embeddings[0]
     source_embeddings = all_embeddings[1:]
 

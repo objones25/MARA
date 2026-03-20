@@ -11,6 +11,7 @@ loaded back in Python for cosine similarity.  This maps cleanly to
 ``vector(N)`` + pgvector HNSW index in a future Postgres backend.
 """
 
+import re
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -18,6 +19,42 @@ from pathlib import Path
 from mara.logging import get_logger
 
 _log = get_logger(__name__)
+
+# FTS5 reserved words and special characters that must not appear verbatim in
+# a MATCH expression when the input is raw natural-language text.
+#
+# FTS5 interprets:
+#   -term          → NOT term (hyphens as unary NOT operator)
+#   column:term    → column filter (colon as column specifier)
+#   AND / OR / NOT → boolean operators (case-insensitive)
+#   ( )            → grouping
+#   *              → prefix match
+#   ^              → initial token boost
+#   "..."          → phrase query (safe when balanced, fragile otherwise)
+#   ?              → glob single-char wildcard in some builds
+#
+# Stripping non-alphanumeric characters and the three reserved words produces
+# a safe token list that the porter-ascii tokeniser handles correctly.
+_FTS5_RESERVED = frozenset(("AND", "OR", "NOT"))
+
+
+def _sanitize_fts5(query: str) -> str:
+    """Return a safe FTS5 MATCH expression from a natural-language query.
+
+    Replaces every character that is not alphanumeric or whitespace with a
+    space, then removes tokens that are FTS5 boolean operators.  Falls back
+    to ``"*"`` (match everything) if the result is empty.
+
+    Examples
+    --------
+    >>> _sanitize_fts5("state-of-the-art RAG NOT benchmarks")
+    'state of the art RAG benchmarks'
+    >>> _sanitize_fts5("What is X? AND Y: Z")
+    'What is X Y Z'
+    """
+    cleaned = re.sub(r"[^\w\s]", " ", query)
+    tokens = [t for t in cleaned.split() if t.upper() not in _FTS5_RESERVED]
+    return " ".join(tokens) if tokens else "*"
 
 _SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 
@@ -235,6 +272,7 @@ class SQLiteLeafRepository:
         When *run_id* is provided the search is restricted to leaves linked
         to that run via the ``run_leaves`` join table.
         """
+        fts_query = _sanitize_fts5(query_text)
         if run_id is not None:
             rows = self._conn.execute(
                 """
@@ -248,7 +286,7 @@ class SQLiteLeafRepository:
                 ORDER BY rank
                 LIMIT ?
                 """,
-                (query_text, run_id, limit),
+                (fts_query, run_id, limit),
             ).fetchall()
         else:
             rows = self._conn.execute(
@@ -261,7 +299,7 @@ class SQLiteLeafRepository:
                 ORDER BY rank
                 LIMIT ?
                 """,
-                (query_text, limit),
+                (fts_query, limit),
             ).fetchall()
         return [dict(r) for r in rows]
 

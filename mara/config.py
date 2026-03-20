@@ -36,6 +36,7 @@ class ResearchConfig(BaseSettings):
     brave_api_key: str = Field(default="", alias="BRAVE_API_KEY")
     firecrawl_api_key: str = Field(default="", alias="FIRECRAWL_API_KEY")
     anthropic_api_key: str = Field(default="", alias="ANTHROPIC_API_KEY")
+    hf_token: str = Field(default="", alias="HF_TOKEN", description="HuggingFace Hub token for authenticated model downloads.")
 
     # LLM / embedding
     model: str = "claude-sonnet-4-6"
