@@ -860,7 +860,7 @@ wheels = [
 [[package]]
 name = "mara"
 version = "0.1.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "firecrawl-py" },
     { name = "httpx" },
