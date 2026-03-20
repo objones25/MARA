@@ -42,7 +42,6 @@
     - [Retrieval experimentation](#retrieval-experimentation)
   - [Statistical Confidence Scoring](#statistical-confidence-scoring)
     - [Model framing](#model-framing)
-    - [Corrective RAG loop](#corrective-rag-loop)
     - [Claim extraction](#claim-extraction)
   - [LangGraph Implementation Details](#langgraph-implementation-details)
     - [State schema](#state-schema)
@@ -107,8 +106,8 @@ Current mitigations — RAG, chain-of-thought, temperature reduction — reduce 
 | Citations                 | URLs in footnotes        | SHA-256 Merkle leaf + URL + timestamp                       |
 | Verification              | Trust the LLM            | Recompute hash against source                               |
 | Hallucination detection   | Post-hoc / probabilistic | Structural (hash mismatch) + statistical (confidence score) |
-| Source-absent halluc.     | Corrective RAG loop      | ✅ Corrective RAG triggered by low confidence               |
-| Source-inconsist. halluc. | None                     | ✅ HITL checkpoint + multi-source agreement score           |
+| Source-absent halluc.     | None                     | ✅ HITL checkpoint surfaces low-confidence claims           |
+| Source-inconsist. halluc. | None                     | ✅ HITL checkpoint + Beta-Binomial multi-source agreement   |
 | Audit trail               | LLM output only          | Full Merkle tree + LangSmith trace                          |
 | Reproducibility           | None                     | Same inputs → same root hash (deterministic)                |
 
@@ -116,7 +115,7 @@ Current mitigations — RAG, chain-of-thought, temperature reduction — reduce 
 
 ## Architecture
 
-The agent is implemented as a directed `StateGraph` in LangGraph. Control flows through ten nodes, some of which fan out into parallel subgraphs using the `Send` API. The Merkle integrity layer is a data structure — not a separate node — that is built incrementally as sources are hashed and committed into the agent state.
+The agent is implemented as a directed `StateGraph` in LangGraph. Control flows through eleven nodes, some of which fan out into parallel subgraphs using the `Send` API. The Merkle integrity layer is a data structure — not a separate node — that is built incrementally as sources are hashed and committed into the agent state.
 
 ```
 ┌────────────────────────────────────────────────────────────────┐
@@ -166,7 +165,7 @@ LangSmith traces every node invocation, every LLM call, and every routing decisi
 
 **Why this matters:** A top-level question like _"What are the long-term economic effects of universal basic income?"_ is too broad for any single search. Breaking it into sub-queries — covering empirical pilots, theoretical models, criticisms, and regional case studies — gives the search workers tighter retrieval targets, which in turn improves the signal-to-noise ratio of retrieved chunks and makes the confidence scorer's job easier.
 
-**Implementation note:** The planner uses a structured output schema (a list of `SubQuery` objects, each with a `query` string and a `domain` hint). The structured output is enforced using LangChain's `.with_structured_output()` on the LLM call, ensuring the downstream `Send()` fan-out always receives well-formed payloads.
+**Implementation note:** The planner instructs the LLM to return a bare JSON array, where each element has a `query` string and a `domain` hint. The response is parsed by `_parse_sub_queries`, which strips optional markdown fences and coerces field types. `SubQuery` is kept as a plain TypedDict (JSON-serialisable, LangGraph-checkpointable) — no parallel Pydantic model is needed at the LLM boundary.
 
 **LangGraph pattern used:** A single node with a conditional edge that fans out to parallel search workers via the `Send` API.
 
@@ -335,7 +334,7 @@ async def retriever(state: MARAState, config: RunnableConfig) -> dict:
 
 **Integrity separation:** The Merkle tree commits to _all_ scraped leaves — retrieval does not affect which sources are recorded. The retriever only determines which subset of those committed sources is used for claim extraction. This keeps the two layers orthogonal: the Merkle root proves what was scraped; `retrieved_leaves` records what was used for reasoning.
 
-**Embedding model:** Uses `confidence.embeddings.embed()` with the configured `embedding_model` (default: `all-MiniLM-L6-v2`). The retriever shares the same model as the Confidence Scorer's SA signal, so there is only one model load at startup.
+**Embedding model:** Uses `confidence.embeddings.embed()` with the configured `embedding_model` (default: `all-MiniLM-L6-v2`). The retriever shares the same model as the Confidence Scorer, so there is only one model load at startup.
 
 **LangGraph pattern used:** Standard sequential node. CPU-bound work (`embed()`, `bm25_search()`) runs via `asyncio.to_thread`; synchronous SQLite cache reads execute on the event loop thread (fast, < 5 ms).
 
@@ -347,64 +346,25 @@ async def retriever(state: MARAState, config: RunnableConfig) -> dict:
 
 #### The scoring model
 
-The confidence score for claim `c` is a weighted combination of three signals.
-
----
-
-**Signal 1 — Source agreement rate (SA):**
-
-SA is modelled using a **Beta-Binomial conjugate model** — the standard Bayesian approach for estimating a proportion from count data. We treat each source as an independent Bernoulli trial: does this source support the claim?
-
-Prior: `Beta(α=1, β=1)` — a uniform (maximally uninformative) prior, making no prior assumption about support probability.
-
-After observing `k` supporting sources out of `n` total retrieved, the posterior is:
+The confidence score for claim `c` is the **Beta-Binomial posterior mean** over all retrieved leaves:
 
 ```
-posterior = Beta(1 + k, 1 + (n − k))
-SA(c)     = (1 + k) / (2 + n)        ← posterior mean (Laplace-smoothed)
+confidence(c) = SA(c) = (1 + k) / (2 + n)
 ```
 
-This is the Laplace-smoothed estimator. It avoids boundary values of 0 and 1, which ensures that "zero supporting sources from a small sample" is not treated with the same certainty as "zero supporting sources from a large sample."
+where `k` is the number of retrieved leaves whose cosine similarity to the claim exceeds `similarity_support_threshold` (default τ = 0.72), and `n` is the total number of retrieved leaves.
 
-A source "supports" the claim if `model.similarity(claim_embedding, source_embedding) > τ` (default τ = 0.72), using `SentenceTransformer("all-MiniLM-L6-v2")`.
+This is the Laplace-smoothed estimator from a `Beta(1, 1)` prior — a standard Bayesian approach for estimating a proportion from count data. It avoids boundary values of 0 and 1: "zero supporting leaves from a small sample" is not treated with the same certainty as "zero supporting leaves from a large sample." The score is always in the open interval (0, 1).
 
----
-
-**Signal 2 — Cross-source consistency (CSC):**
-
-Among the supporting sources, we measure how uniformly they support the claim using the **coefficient of variation (CV)** — a standard normalised dispersion measure.
-
-```
-CSC(c) = 1 − CV  =  1 − (std(similarities) / mean(similarities))
-         where similarities = {sim(c, s_i) : s_i ∈ supporting_sources}
-```
-
-High CV means supporting sources vary widely in how strongly they support the claim, which may indicate the claim is a generalisation that individual sources endorse only partially. CSC defaults to 0.5 when fewer than 2 sources support the claim (insufficient data for a consistency estimate).
-
----
-
-**Signal 3 — LLM self-assessment (LSA):**
-
-A separate LLM call asks: _"Given only the following retrieved sources, is this claim directly supported, partially supported, or unsupported?"_ The response maps to 1.0, 0.5, or 0.0. This is an independent signal that catches cases where semantic similarity is high but the logical relationship is wrong — for example, a claim that misquotes a number from a source that does contain a number on that topic. LSA is a calibration signal, not a probabilistic estimate.
-
----
-
-**Final composite score:**
-
-```
-confidence(c) = α·SA(c) + β·CSC(c) + γ·LSA(c)
-```
-
-Default weights: `α=0.4, β=0.2, γ=0.4`. These are configurable and are candidates for learned optimisation using accumulated LangSmith trace data.
+Similarities are computed between `SentenceTransformer("all-MiniLM-L6-v2")` embeddings of the claim and all retrieved leaf texts.
 
 #### Routing based on confidence
 
-All routing decisions use the **composite confidence score**. The individual signal values (SA, CSC, LSA) are surfaced in the HITL interface to help the human reviewer diagnose _why_ a claim scored low — they do not independently gate routing branches.
+All claims route through `hitl_checkpoint`, which applies `high_confidence_threshold` internally:
 
 ```
-confidence ≥ 0.80  →  fast path to Report Synthesizer
-0.55 ≤ confidence < 0.80  →  Corrective RAG: retrieve more sources, re-score claim
-confidence < 0.55  →  HITL Checkpoint: human review required
+confidence ≥ 0.80  →  auto-approved
+confidence < 0.80  →  HITL interrupt: human review required
 ```
 
 ---
@@ -413,35 +373,29 @@ confidence < 0.55  →  HITL Checkpoint: human review required
 
 **Role:** When one or more claims score below the confidence floor, the graph pauses execution using LangGraph's `interrupt()` mechanism and surfaces the problematic claims to a human reviewer.
 
-The checkpoint presents:
-
-- The claim text
-- Its confidence score and which signals dragged it down
-- The sources that were retrieved (with their Merkle leaf indices)
-- Three options: **Approve** (the human overrides and accepts the claim), **Reject** (the claim is dropped from the report), or **Retry** (the human can provide an amended search query to retrieve better sources)
+The checkpoint presents each claim below `high_confidence_threshold` with its confidence score and source indices. The human enters a comma-separated list of indices to approve; the rest are dropped.
 
 ```python
 # agent/nodes/hitl_checkpoint.py (simplified)
 def hitl_checkpoint(state: MARAState) -> dict:
-    config = state["config"]
-    needs_review = [c for c in state["scored_claims"]
-                    if c.confidence < config.low_confidence_threshold]
+    high_threshold = state["config"].high_confidence_threshold
     auto_approved = [c for c in state["scored_claims"]
-                     if c.confidence >= config.high_confidence_threshold]
+                     if c.confidence >= high_threshold]
+    needs_review  = [c for c in state["scored_claims"]
+                     if c.confidence <  high_threshold]
 
-    if needs_review:
-        approved_indices = interrupt({
-            "needs_review": [{"index": i, "text": c.text, "confidence": c.confidence,
-                               "source_indices": c.source_indices}
-                             for i, c in enumerate(needs_review)],
-            "auto_approved_count": len(auto_approved),
-        })
-        # Resume: Command(resume={"approved_indices": [0, 2]})
-        human_approved = [needs_review[i] for i in approved_indices["approved_indices"]
-                          if 0 <= i < len(needs_review)]
-    else:
-        human_approved = []
+    if not needs_review:
+        return {"human_approved_claims": auto_approved}
 
+    decision = interrupt({
+        "needs_review": [{"index": i, "text": c.text, "confidence": c.confidence,
+                           "source_indices": c.source_indices}
+                         for i, c in enumerate(needs_review)],
+        "auto_approved_count": len(auto_approved),
+    })
+    # Resume: Command(resume={"approved_indices": [0, 2]})
+    human_approved = [needs_review[i] for i in decision["approved_indices"]
+                      if i < len(needs_review)]
     return {"human_approved_claims": auto_approved + human_approved}
 ```
 
@@ -604,7 +558,7 @@ Brave's data is genuinely useful for everything **except** integrity commitments
 
 For Merkle integrity to hold, chunking must be **deterministic and reproducible**: the same source page must always be split into the same chunks. This rules out chunking strategies that depend on model tokenisation windows, probabilistic sentence boundary detection, or any state not encoded in the source text itself.
 
-The current approach uses fixed-size character chunking with overlap, implemented in `agent/nodes/source_hasher.py`. The chunk size and overlap are configurable parameters. This is the simplest chunking strategy that satisfies the determinism requirement.
+The current approach uses fixed-size character chunking with overlap, implemented in `agent/nodes/search_worker/firecrawl_scrape.py`. The chunk size and overlap are configurable parameters. This is the simplest chunking strategy that satisfies the determinism requirement.
 
 ### Hybrid retrieval over the scraped corpus
 
@@ -642,17 +596,7 @@ Any retrieval improvement must still produce deterministic chunks that can be ha
 
 ### Model framing
 
-The SA signal uses a Beta-Binomial conjugate model, which is covered in detail in the Confidence Scorer node section above. To summarise: SA is the posterior mean of a `Beta(1 + k, 1 + n − k)` distribution, where `k` sources out of `n` retrieved exceed the cosine similarity threshold. This is a principled and well-established Bayesian estimator for proportions.
-
-CSC and LSA are not probabilistic models — they are heuristic signals that provide independent perspectives on claim quality. The weighted sum that combines all three is a heuristic aggregator, not a full Bayesian update. The weights `α, β, γ` are configurable and are the primary targets for learned optimisation as LangSmith traces accumulate.
-
-### Corrective RAG loop
-
-The corrective RAG loop fires when the **composite confidence score** falls in the middle band (`0.55 ≤ confidence < 0.80`). The loop re-runs the search worker with a refined query — the Query Planner is invoked again in "refine" mode with the failing claim as additional context. New chunks are hashed, added to the Merkle tree as new leaves, and the confidence scorer re-evaluates the claim against the augmented source set.
-
-The composite score determines routing in all cases. The individual signal breakdown (which of SA, CSC, LSA dragged the score down) is surfaced in the HITL interface as diagnostic context, not as a separate routing condition.
-
-The loop has a configurable maximum iteration count (default: 2) to prevent runaway retrieval.
+The confidence score is the Beta-Binomial posterior mean (SA), covered in full in the Confidence Scorer node section above. SA is the posterior mean of a `Beta(1 + k, 1 + n − k)` distribution, where `k` leaves out of `n` retrieved exceed the cosine similarity threshold. This is a principled, well-established Bayesian estimator for proportions that requires no training data and produces appropriate uncertainty for small sample sizes.
 
 ### Claim extraction
 
@@ -681,6 +625,7 @@ from langgraph.graph.message import add_messages
 class MARAState(TypedDict):
     # ---- Input ----
     query: str
+    run_date: str          # YYYY-MM-DD UTC date, set at pipeline start
     config: ResearchConfig
 
     # ---- Planner output ----
@@ -756,7 +701,7 @@ Every node that makes an LLM call forwards this `config` to `ainvoke` / `invoke`
 # query_planner — LangSmith nests this span under "query_planner" step
 response = await llm.ainvoke(messages, config)
 
-# confidence_scorer — each LSA call is nested under "confidence_scorer" step
+# confidence_scorer — embed() call is nested under "confidence_scorer" step
 response = llm.invoke(messages, config)
 ```
 
@@ -874,7 +819,7 @@ The full hash is always available in the report's `leaves` array for complete ve
 A standalone CLI tool is included for independent verification of any `CertifiedReport` without running the full agent:
 
 ```bash
-mara verify --report report.json
+mara verify report.json
 
 # Output:
 # ✓ Merkle root matches: a4f2c1d8e9...
@@ -904,36 +849,33 @@ BRAVE_API_KEY=...
 FIRECRAWL_API_KEY=...
 HF_TOKEN=...                    # HuggingFace Hub token (model downloads + inference)
 
-MARA_MODEL=Qwen/Qwen3-30B-A3B-Instruct
-MARA_LSA_MODEL=Qwen/Qwen3-32B-Instruct
+MARA_MODEL=Qwen/Qwen3-30B-A3B-Instruct-2507
+MARA_HF_PROVIDER=featherless-ai
 MARA_HIGH_CONFIDENCE_THRESHOLD=0.80
-MARA_CONFIDENCE_WEIGHTS__ALPHA=0.4
 ```
 
-| Parameter                      | Default                           | Description                                                              |
-| ------------------------------ | --------------------------------- | ------------------------------------------------------------------------ |
-| `model`                        | `Qwen/Qwen3-30B-A3B-Instruct`     | LLM for query planning, claim extraction, and report synthesis           |
-| `lsa_model`                    | `Qwen/Qwen3-32B-Instruct`         | LLM for LSA scoring — dense model for better structured-output accuracy  |
-| `embedding_model`              | `all-MiniLM-L6-v2`                | `sentence-transformers` model for retrieval and SA/CSC scoring           |
-| `max_sources`                  | `20`                              | Brave results requested per sub-query (Brave API cap: 20/request)        |
-| `max_workers`                  | `3`                               | Number of parallel sub-queries (each spawns one web + one ArXiv worker)  |
-| `arxiv_max_results`            | `5`                               | ArXiv papers fetched per sub-query                                       |
-| `max_retrieval_candidates`     | `150`                             | Retrieval pool size; reserve for future reranking stage                  |
-| `max_claim_sources`            | `50`                              | Leaves passed to claim extraction after retrieval (≤ candidates)         |
-| `max_corrective_rag_loops`     | `2`                               | Max corrective RAG retries per low-confidence claim                      |
-| `high_confidence_threshold`    | `0.80`                            | Composite score above which claims are auto-approved                     |
-| `low_confidence_threshold`     | `0.55`                            | Composite score below which claims go to HITL                            |
-| `similarity_support_threshold` | `0.72`                            | Cosine similarity for a source to "support" a claim                      |
-| `confidence_weights.alpha`     | `0.4`                             | Weight for source agreement rate (SA)                                    |
-| `confidence_weights.beta`      | `0.2`                             | Weight for cross-source consistency (CSC)                                |
-| `confidence_weights.gamma`     | `0.4`                             | Weight for LLM self-assessment (LSA)                                     |
-| `hash_algorithm`               | `sha256`                          | Hash function for Merkle leaves (extensible)                             |
-| `chunk_size`                   | `1000`                            | Fixed character chunk size for source text splitting                     |
-| `chunk_overlap`                | `200`                             | Character overlap between consecutive chunks                             |
-| `checkpointer`                 | `memory`                          | `memory` or `postgres`                                                   |
-| `leaf_db_path`                 | `~/.mara/leaves.db`               | Path to the SQLite leaf database (tilde-expanded at open time)           |
-| `leaf_cache_max_age_hours`     | `168.0` (7 days)                  | How long a scraped URL's leaves are considered fresh                     |
-| `leaf_db_enabled`              | `True`                            | Set to `False` to disable all DB reads/writes (CI / unit tests)          |
+| Parameter                      | Default                            | Description                                                                                          |
+| ------------------------------ | ---------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| `model`                        | `Qwen/Qwen3-30B-A3B-Instruct-2507` | LLM for query planning, claim extraction, and report synthesis                                       |
+| `hf_provider`                  | `featherless-ai`                   | HuggingFace Inference Provider (`featherless-ai`, `groq`, `novita`, `auto`)                          |
+| `embedding_model`              | `all-MiniLM-L6-v2`                 | `sentence-transformers` model for retrieval and confidence scoring                                       |
+| `max_sources`                  | `20`                               | Brave results requested per sub-query (Brave API cap: 20/request)                                    |
+| `max_workers`                  | `3`                                | Number of parallel sub-queries (each spawns one web + one ArXiv worker)                              |
+| `arxiv_max_results`            | `5`                                | ArXiv papers fetched per sub-query                                                                   |
+| `brave_freshness`              | `""`                               | Optional freshness filter: `pd` (24h), `pw` (7d), `pm` (31d), `py` (1y), or `YYYY-MM-DDtoYYYY-MM-DD` |
+| `max_retrieval_candidates`     | `150`                              | Retrieval pool size; reserve for future reranking stage                                              |
+| `max_claim_sources`            | `50`                               | Leaves passed to claim extraction after retrieval (≤ candidates)                                     |
+| `max_corrective_rag_loops`     | `2`                                | Max corrective RAG retries per low-confidence claim                                                  |
+| `high_confidence_threshold`    | `0.80`                             | Composite score above which claims are auto-approved                                                 |
+| `low_confidence_threshold`     | `0.55`                             | Composite score below which claims go to HITL                                                        |
+| `similarity_support_threshold` | `0.72`                             | Cosine similarity for a source to "support" a claim                                                  |
+| `hash_algorithm`               | `sha256`                           | Hash function for Merkle leaves (extensible)                                                         |
+| `chunk_size`                   | `1000`                             | Fixed character chunk size for source text splitting                                                 |
+| `chunk_overlap`                | `200`                              | Character overlap between consecutive chunks                                                         |
+| `checkpointer`                 | `memory`                           | `memory` or `postgres`                                                                               |
+| `leaf_db_path`                 | `~/.mara/leaves.db`                | Path to the SQLite leaf database (tilde-expanded at open time)                                       |
+| `leaf_cache_max_age_hours`     | `168.0` (7 days)                   | How long a scraped URL's leaves are considered fresh                                                 |
+| `leaf_db_enabled`              | `True`                             | Set to `False` to disable all DB reads/writes (CI / unit tests)                                      |
 
 ---
 
@@ -955,7 +897,7 @@ mara/
 │   │   ├── merkle_builder.py     # Assembles MerkleTree from leaf hashes
 │   │   ├── retriever.py          # Hybrid BM25+semantic RRF retrieval: all leaves → top-K
 │   │   ├── claim_extractor.py    # LLM extraction: retrieved text → atomic claims
-│   │   ├── confidence_scorer.py  # SA + CSC + LSA → ScoredClaim for each claim
+│   │   ├── confidence_scorer.py  # Beta-Binomial SA → ScoredClaim for each claim
 │   │   ├── hitl_checkpoint.py    # interrupt() + human approval handling
 │   │   ├── report_synthesizer.py # Approved claims → prose with Merkle leaf citations
 │   │   └── certified_output.py   # Assembles final CertifiedReport; closes DB run
@@ -973,9 +915,9 @@ mara/
 │   ├── proof.py              # Merkle proof generation and path verification
 │   └── hasher.py             # canonical_serialise() — deterministic json.dumps for hashing
 ├── confidence/               # Pure logic layer — no LangGraph imports
-│   ├── scorer.py             # Computes SA (Beta-Binomial), CSC (CV), LSA; returns ScoredClaim
+│   ├── scorer.py             # Computes SA (Beta-Binomial posterior mean); returns ScoredClaim
 │   ├── embeddings.py         # SentenceTransformer model loading and embedding cache
-│   └── signals.py            # Individual SA, CSC, LSA signal computation functions
+│   └── signals.py            # compute_sa: Beta-Binomial SA signal computation
 ├── cli/
 │   └── run.py                # Typer CLI: `mara run QUERY` and `mara info`
 ├── api/                      # Planned — thin FastAPI adapter over the same agent core
@@ -990,19 +932,22 @@ mara/
 tests/
 ├── test_config.py                    # ResearchConfig validation, env loading, nested model
 ├── test_logging.py                   # get_logger hierarchy
+├── test_report_store.py              # Report save/load round-trip
+├── test_verifier.py                  # Merkle integrity verification
 ├── db/
-│   └── test_sqlite_repository.py     # All 44 repository tests use in-memory SQLite (:memory:)
+│   └── test_sqlite_repository.py     # All 55 repository tests use in-memory SQLite (:memory:)
 ├── merkle/
 │   ├── test_hasher.py                # canonical_serialise determinism; hash stability
 │   ├── test_tree.py                  # Tree construction, odd-leaf duplication, root hash
 │   └── test_proof.py                 # Proof generation and path verification
 ├── confidence/
-│   ├── test_signals.py               # SA Beta-Binomial formula (numerically verified), CSC
+│   ├── test_signals.py               # SA Beta-Binomial formula numerically verified
 │   ├── test_scorer.py                # Composite score computation; threshold routing
 │   └── test_embeddings.py            # Embedding cache; model loading
 ├── agent/
 │   ├── test_state.py                 # TypedDict field presence and defaults
 │   ├── test_graph.py                 # Full graph compilation; expected node topology
+│   ├── test_llm.py                   # make_llm factory; strip_think helper
 │   ├── nodes/
 │   │   ├── test_query_planner.py     # Sub-query decomposition with mocked LLM
 │   │   ├── test_source_hasher.py     # Chunk → MerkleLeaf pipeline; DB persistence path
@@ -1019,8 +964,10 @@ tests/
 │   │       └── test_graph.py         # Search worker subgraph topology
 │   └── edges/
 │       └── test_routing.py           # dispatch_search_workers, route_after_scoring
-└── cli/
-    └── test_run.py                   # CLI: arg parsing, HITL loop, report display; DB disabled path
+├── cli/
+│   ├── test_run.py                   # CLI: arg parsing, HITL loop, report display; DB disabled path
+│   └── test_verify.py                # CLI verify command; pass/fail exit codes
+└── integration/                      # Planned — full end-to-end graph tests with mocked I/O
 ```
 
 The `confidence/` module is intentionally decoupled from LangGraph — it contains pure Python functions that take claims and source chunks and return scores. `agent/nodes/confidence_scorer.py` is the thin wrapper that pulls scored claims from state, calls into `confidence/scorer.py`, and writes results back to state. This separation means the scoring logic can be tested, benchmarked, and iterated on without running the full graph.
@@ -1031,20 +978,20 @@ The `confidence/` module is intentionally decoupled from LangGraph — it contai
 
 Runtime dependencies are declared in `[project.dependencies]`. Test and dev tooling live in `[dependency-groups]` and are never included in the published package.
 
-| Package                    | Role                                                                                                        |
-| -------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `langgraph>=0.2`           | Agent graph orchestration, checkpointing, HITL                                                              |
-| `langchain>=0.3`           | LLM abstractions, tool calling, structured output                                                           |
-| `langchain-huggingface`    | `ChatHuggingFace` + `HuggingFaceEndpoint` for Qwen3 inference via HF Inference Providers                   |
-| `langsmith`                | Tracing, evaluation, experiment tracking                                                                    |
-| `sentence-transformers`    | Local embeddings via `all-MiniLM-L6-v2` for SA and CSC scoring                                             |
-| `firecrawl-py`             | Full-text page scraping for source extraction and hashing; citation crawl                                   |
-| `httpx`                    | Async HTTP client for Brave Search API and ArXiv API — no wrapper package needed                            |
-| `pydantic>=2`              | State schema validation and serialisation                                                                   |
-| `pydantic-settings`        | `BaseSettings` for `ResearchConfig`; loads `.env`, validates env vars with type checking                    |
-| `typer`                    | CLI framework for `cli/`; chosen for Pydantic compatibility and clean `--help` output                       |
-| `psycopg[binary]`          | PostgreSQL connection for production checkpointer                                                           |
-| `json`, `hashlib`          | Stdlib — deterministic serialisation and SHA-256 hashing; no extra dependency                               |
+| Package                 | Role                                                                                     |
+| ----------------------- | ---------------------------------------------------------------------------------------- |
+| `langgraph>=0.2`        | Agent graph orchestration, checkpointing, HITL                                           |
+| `langchain>=0.3`        | LLM abstractions, tool calling, structured output                                        |
+| `langchain-huggingface` | `ChatHuggingFace` + `HuggingFaceEndpoint` for Qwen3 inference via HF Inference Providers |
+| `langsmith`             | Tracing, evaluation, experiment tracking                                                 |
+| `sentence-transformers` | Local embeddings via `all-MiniLM-L6-v2` for retrieval and confidence scoring              |
+| `firecrawl-py`          | Full-text page scraping for source extraction and hashing; citation crawl                |
+| `httpx`                 | Async HTTP client for Brave Search API and ArXiv API — no wrapper package needed         |
+| `pydantic>=2`           | State schema validation and serialisation                                                |
+| `pydantic-settings`     | `BaseSettings` for `ResearchConfig`; loads `.env`, validates env vars with type checking |
+| `typer`                 | CLI framework for `cli/`; chosen for Pydantic compatibility and clean `--help` output    |
+| `psycopg[binary]`       | PostgreSQL connection for production checkpointer                                        |
+| `json`, `hashlib`       | Stdlib — deterministic serialisation and SHA-256 hashing; no extra dependency            |
 
 **API group** (`uv sync --group api` — planned, required once `api/` is implemented):
 
@@ -1068,8 +1015,8 @@ Runtime dependencies are declared in `[project.dependencies]`. Test and dev tool
 **Why SHA-256 and not a content-addressed store like IPFS?**
 IPFS would provide globally decentralised content addressing, which is an even stronger integrity guarantee. However, it introduces significant operational complexity (running an IPFS node, pinning content) and is overkill for a local research session. SHA-256 leaf hashes embedded in the report are sufficient for the primary use case: a reader verifying that a specific agent session used specific source text. IPFS integration is a natural extension for a publishing use case where permanence matters.
 
-**Why use a Beta-Binomial model for source agreement (SA) rather than a trained classifier?**
-A trained classifier would require a labelled dataset of (claim, sources, grounded/hallucinated) examples, which is expensive to produce. The Beta-Binomial model is well-established, requires no training data, produces a principled probability estimate with appropriate uncertainty for small sample sizes (via the Laplace-smoothed posterior mean), and remains interpretable — you can see the raw k/n counts that drove the score. The weighted aggregation across SA, CSC, and LSA is a heuristic combinator on top of that, not a full Bayesian model. As LangSmith traces accumulate, the weights α, β, γ are candidates for learned optimisation.
+**Why use a Beta-Binomial model for source agreement rather than a trained classifier?**
+A trained classifier would require a labelled dataset of (claim, sources, grounded/hallucinated) examples, which is expensive to produce. The Beta-Binomial model is well-established, requires no training data, produces a principled probability estimate with appropriate uncertainty for small sample sizes (via the Laplace-smoothed posterior mean), and remains interpretable — you can see the raw k/n counts that drove the score.
 
 **Why extract atomic claims rather than score paragraphs?**
 Paragraph-level scoring would mask within-paragraph variance. A paragraph that is 80% well-supported but contains one hallucinated number would score 0.8 and pass to the report. Atomic claim extraction surfaces the hallucinated number as a single low-scoring claim that can be flagged or removed without discarding the surrounding well-supported text.
@@ -1178,7 +1125,7 @@ The module structure is deliberately shaped to make testing tractable:
 
 - `merkle/` and `confidence/` are pure Python with no external I/O — test them exhaustively with exact numerical assertions. The SA Beta-Binomial formula, for example, can be verified to floating-point precision given known k and n values.
 - `agent/nodes/` tests verify LangGraph wiring: given a known input state, does the node return the expected output state? External API calls are always mocked.
-- `tests/integration/test_full_run.py` runs the complete graph with mocked Brave, Firecrawl, and LLM calls, and asserts that routing decisions (corrective RAG firing, HITL triggering) behave correctly for crafted confidence scenarios.
+- `tests/integration/` (planned) will run the complete graph with mocked Brave, Firecrawl, and LLM calls, asserting that routing decisions (corrective RAG firing, HITL triggering) behave correctly for crafted confidence scenarios.
 
 ---
 
@@ -1209,8 +1156,9 @@ FIRECRAWL_API_KEY=your_firecrawl_key
 HF_TOKEN=your_huggingface_token      # used for model downloads and inference
 
 # Optional overrides (shown with defaults)
-MARA_MODEL=Qwen/Qwen3-30B-A3B-Instruct
-MARA_LSA_MODEL=Qwen/Qwen3-32B-Instruct
+MARA_MODEL=Qwen/Qwen3-30B-A3B-Instruct-2507
+MARA_HF_PROVIDER=featherless-ai
+MARA_EMBEDDING_MODEL=all-MiniLM-L6-v2
 MARA_MAX_WORKERS=3
 MARA_ARXIV_MAX_RESULTS=5
 MARA_HIGH_CONFIDENCE_THRESHOLD=0.80
