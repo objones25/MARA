@@ -229,6 +229,10 @@ def info() -> None:
     typer.echo(f"  Max corrective loops: {config.max_corrective_rag_loops}")
     typer.echo(f"  Hash algorithm:       {config.hash_algorithm}")
     typer.echo(f"  Checkpointer:         {config.checkpointer}")
+    typer.echo(f"  Leaf DB enabled:      {config.leaf_db_enabled}")
+    if config.leaf_db_enabled:
+        typer.echo(f"  Leaf DB path:         {config.leaf_db_path}")
+        typer.echo(f"  Leaf cache max age:   {config.leaf_cache_max_age_hours}h")
 
     typer.echo("\nGraph nodes:")
     graph = build_graph()
