@@ -42,19 +42,23 @@ def _sanitize_fts5(query: str) -> str:
     """Return a safe FTS5 MATCH expression from a natural-language query.
 
     Replaces every character that is not alphanumeric or whitespace with a
-    space, then removes tokens that are FTS5 boolean operators.  Falls back
-    to ``"*"`` (match everything) if the result is empty.
+    space, then removes tokens that are FTS5 boolean operators or shorter than
+    4 characters (stopwords, articles, prepositions).  Joins surviving tokens
+    with ``OR`` so any matching token scores a result — avoiding the implicit
+    AND semantics that FTS5 applies by default and that returns zero results
+    for long natural-language research questions.  Falls back to ``"*"``
+    (match everything) if the result is empty.
 
     Examples
     --------
-    >>> _sanitize_fts5("state-of-the-art RAG NOT benchmarks")
-    'state of the art RAG benchmarks'
-    >>> _sanitize_fts5("What is X? AND Y: Z")
-    'What is X Y Z'
+    >>> _sanitize_fts5("state-of-the-art benchmarks")
+    'state OR benchmarks'
+    >>> _sanitize_fts5("What are current nuclear fusion approaches?")
+    'What OR current OR nuclear OR fusion OR approaches'
     """
     cleaned = re.sub(r"[^\w\s]", " ", query)
-    tokens = [t for t in cleaned.split() if t.upper() not in _FTS5_RESERVED]
-    return " ".join(tokens) if tokens else "*"
+    tokens = [t for t in cleaned.split() if len(t) >= 4 and t.upper() not in _FTS5_RESERVED]
+    return " OR ".join(tokens) if tokens else "*"
 
 _SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 

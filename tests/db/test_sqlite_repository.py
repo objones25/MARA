@@ -476,9 +476,9 @@ class TestFtsTriggers:
 class TestSanitizeFts5:
     """Unit tests for _sanitize_fts5 — the natural-language → FTS5 converter."""
 
-    def test_plain_query_unchanged(self):
+    def test_plain_query_uses_or_separator(self):
         from mara.db.sqlite_repository import _sanitize_fts5
-        assert _sanitize_fts5("machine learning") == "machine learning"
+        assert _sanitize_fts5("machine learning") == "machine OR learning"
 
     def test_hyphens_replaced_with_spaces(self):
         from mara.db.sqlite_repository import _sanitize_fts5
@@ -502,10 +502,13 @@ class TestSanitizeFts5:
         result = _sanitize_fts5("neural AND networks")
         assert "AND" not in result.split()
 
-    def test_reserved_word_or_removed(self):
+    def test_reserved_word_or_in_input_is_handled(self):
+        # "OR" in user input is stripped then re-added as our OR separator —
+        # the output is still valid FTS5 and both terms appear.
         from mara.db.sqlite_repository import _sanitize_fts5
         result = _sanitize_fts5("neural OR networks")
-        assert "OR" not in result.split()
+        assert "neural" in result
+        assert "networks" in result
 
     def test_reserved_word_not_removed(self):
         from mara.db.sqlite_repository import _sanitize_fts5
@@ -536,3 +539,25 @@ class TestSanitizeFts5:
             "What are the current state-of-the-art approaches to retrieval augmented generation?"
         )
         assert isinstance(result, list)
+
+    def test_multi_word_natural_language_query_returns_results(self, repo):
+        """Multi-token NL queries must return results via OR semantics.
+
+        With the old implicit-AND FTS5 semantics a 20-token question like
+        "What are the current leading approaches to nuclear fusion energy"
+        matches zero 200-word chunks because no single chunk contains every
+        token.  OR semantics fix this — any overlapping term is enough.
+        """
+        leaf = _make_leaf(
+            hash_="h_fusion",
+            text="Nuclear fusion energy research has made significant advances in recent years.",
+        )
+        leaf["contextualized_text"] = leaf["text"]
+        repo.upsert_leaves([leaf])
+        result = repo.bm25_search(
+            "What are the current leading approaches to nuclear fusion energy research?"
+        )
+        hashes = {r["hash"] for r in result}
+        assert "h_fusion" in hashes, (
+            "OR-based BM25 should find leaf matching 'nuclear', 'fusion', or 'energy'"
+        )
