@@ -50,11 +50,45 @@ def _format_leaves(leaves: list[MerkleLeaf]) -> list[tuple[int, str, str]]:
     return [(leaf["index"], leaf["url"], leaf["text"]) for leaf in leaves]
 
 
+def _recover_partial_json_array(text: str) -> list:
+    """Recover complete JSON objects from a token-truncated array.
+
+    Uses ``json.JSONDecoder.raw_decode`` to consume well-formed items one at a
+    time, stopping at the first object that cannot be parsed (the truncation
+    point).  This salvages all claims that completed before the token budget
+    ran out.
+
+    Args:
+        text: Potentially truncated JSON array string, starting with ``[``.
+
+    Returns:
+        List of dicts for all complete items found before the cutoff.
+    """
+    decoder = json.JSONDecoder()
+    items = []
+    idx = text.index("[") + 1
+    while idx < len(text):
+        while idx < len(text) and text[idx] in " \t\n\r,":
+            idx += 1
+        if idx >= len(text) or text[idx] == "]":
+            break
+        try:
+            obj, idx = decoder.raw_decode(text, idx)
+            items.append(obj)
+        except json.JSONDecodeError:
+            break
+    return items
+
+
 def _parse_claims(content: str) -> list[Claim]:
     """Parse the LLM response into a list of Claim TypedDicts.
 
     Handles optional ```json ... ``` fences.  Items with empty ``text`` are
     dropped — they represent extraction artefacts rather than real claims.
+
+    When ``json.loads`` fails on an array-shaped string, attempts to recover
+    all complete items before the truncation point via ``_recover_partial_json_array``.
+    This handles the case where the LLM hit its token budget mid-output.
 
     Args:
         content: Raw string content from the LLM response.
@@ -63,8 +97,8 @@ def _parse_claims(content: str) -> list[Claim]:
         list[Claim] — may be empty if the model found no claims.
 
     Raises:
-        json.JSONDecodeError: If the content is not valid JSON after fence
-            stripping.
+        json.JSONDecodeError: If the content is not valid JSON and recovery
+            yields nothing (i.e. not a recognisable array at all).
         ValueError: If the parsed JSON is not a list.
     """
     text = strip_think(content)
@@ -73,7 +107,16 @@ def _parse_claims(content: str) -> list[Claim]:
         lines = text.splitlines()
         text = "\n".join(lines[1:-1]).strip()
 
-    data = json.loads(text)
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        if text.lstrip().startswith("["):
+            _log.warning("LLM response appears truncated — attempting partial claim recovery")
+            data = _recover_partial_json_array(text)
+            if not data:
+                raise
+        else:
+            raise
 
     if not isinstance(data, list):
         raise ValueError(f"Expected a JSON array from the LLM, got {type(data).__name__}")
@@ -108,12 +151,12 @@ async def claim_extractor(state: MARAState, config: RunnableConfig) -> dict:
     _log.info("Extracting claims from %d leaf/leaves", len(leaves))
 
     research_config = state["config"]
-    llm = make_llm(research_config.model, research_config.hf_token, 4096, research_config.hf_provider)
+    llm = make_llm(research_config.model, research_config.hf_token, research_config.claim_extractor_max_tokens, research_config.hf_provider, research_config.temperature, research_config.top_p, research_config.top_k, research_config.presence_penalty)
 
     passages = _format_leaves(leaves)
     messages = [
-        {"role": "system", "content": build_system_prompt(state["run_date"])},
-        {"role": "user", "content": build_user_message(passages)},
+        {"role": "system", "content": build_system_prompt(state["run_date"], research_config.max_extracted_claims)},
+        {"role": "user", "content": build_user_message(passages, research_config.max_extracted_claims)},
     ]
 
     response = await llm.ainvoke(messages, config)

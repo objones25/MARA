@@ -46,5 +46,7 @@ def build_user_message(query: str, formatted_claims: str) -> str:
     return (
         f"Research question: {query}\n\n"
         f"Approved claims:\n{formatted_claims}\n\n"
-        "Write the research report now."
+        "Write the research report now. "
+        "Every fact must have an [ML:...] citation immediately after it. "
+        "Prose only — no bullet lists."
     )

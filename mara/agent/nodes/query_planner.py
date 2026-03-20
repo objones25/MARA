@@ -91,7 +91,7 @@ async def query_planner(state: MARAState, config: RunnableConfig) -> dict:
 
     _log.info("Planning query into %d sub-queries: %r", n, state["query"])
 
-    llm = make_llm(research_config.model, research_config.hf_token, 1024, research_config.hf_provider)
+    llm = make_llm(research_config.model, research_config.hf_token, research_config.query_planner_max_tokens, research_config.hf_provider, research_config.temperature, research_config.top_p, research_config.top_k, research_config.presence_penalty)
 
     messages = [
         {"role": "system", "content": build_system_prompt(state["run_date"])},

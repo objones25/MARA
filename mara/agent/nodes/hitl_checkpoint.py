@@ -26,6 +26,9 @@ Why indices instead of full claim objects?
   deserialisation of dataclass instances across process boundaries.
 """
 
+import statistics
+from dataclasses import replace
+
 from langgraph.types import interrupt
 from langchain_core.runnables import RunnableConfig
 
@@ -38,6 +41,10 @@ _log = get_logger(__name__)
 def hitl_checkpoint(state: MARAState, config: RunnableConfig) -> dict:
     """Auto-approve high-confidence claims; interrupt for the rest.
 
+    Contested claims (low confidence but large n_leaves — sources exist but
+    disagree) are flagged with ``contested=True`` before entering the review
+    flow so that human reviewers have full context.
+
     Args:
         state:  MARAState with ``scored_claims`` and ``config`` populated.
         config: LangGraph RunnableConfig (unused directly).
@@ -45,8 +52,30 @@ def hitl_checkpoint(state: MARAState, config: RunnableConfig) -> dict:
     Returns:
         ``{"human_approved_claims": list[ScoredClaim]}``
     """
-    scored = state["scored_claims"]
-    high_threshold = state["config"].high_confidence_threshold
+    cfg = state["config"]
+    high_threshold = cfg.high_confidence_threshold
+
+    # Mark contested claims before any HITL logic — covers first pass,
+    # post-loop-cap, and corrective rounds that exhausted the budget.
+    scored = []
+    for claim in state["scored_claims"]:
+        if (
+            claim.confidence < cfg.low_confidence_threshold
+            and claim.n_leaves >= cfg.n_leaves_contested_threshold
+        ):
+            claim = replace(claim, contested=True)
+        scored.append(claim)
+
+    confidences = [c.confidence for c in scored]
+    if confidences:
+        _log.info(
+            "Confidence stats — mean: %.3f  median: %.3f  std dev: %.3f  min: %.3f  max: %.3f",
+            statistics.mean(confidences),
+            statistics.median(confidences),
+            statistics.stdev(confidences) if len(confidences) > 1 else 0.0,
+            min(confidences),
+            max(confidences),
+        )
 
     auto_approved = [c for c in scored if c.confidence >= high_threshold]
     needs_review = [c for c in scored if c.confidence < high_threshold]

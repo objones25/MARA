@@ -24,6 +24,10 @@ class TestMakeLlm:
             huggingfacehub_api_token="hf-token",
             max_new_tokens=1024,
             provider="featherless-ai",
+            temperature=0.7,
+            top_p=0.8,
+            top_k=20,
+            model_kwargs={"presence_penalty": 1.5},
         )
         mock_chat_cls.assert_called_once_with(llm=mock_endpoint_cls.return_value)
 

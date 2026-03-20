@@ -86,6 +86,7 @@ def make_mara_state():
         certified_report=None,
         messages=None,
         loop_count: int = 0,
+        corrective_sub_queries=None,
     ) -> MARAState:
         return MARAState(
             query=query,
@@ -99,11 +100,12 @@ def make_mara_state():
             retrieved_leaves=retrieved_leaves or [],
             extracted_claims=extracted_claims or [],
             scored_claims=scored_claims or [],
-            human_approved_claims=human_approved_claims or [],
+            human_approved_claims=human_approved_claims,
             report_draft=report_draft,
             certified_report=certified_report,
             messages=messages or [],
             loop_count=loop_count,
+            corrective_sub_queries=corrective_sub_queries or [],
         )
 
     return _factory

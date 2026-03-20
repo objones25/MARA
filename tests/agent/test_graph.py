@@ -18,6 +18,7 @@ EXPECTED_NODES = {
     "retriever",
     "claim_extractor",
     "confidence_scorer",
+    "corrective_retriever",
     "hitl_checkpoint",
     "report_synthesizer",
     "certified_output",

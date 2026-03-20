@@ -50,5 +50,5 @@ def build_user_message(research_question: str, n: int) -> str:
     """
     return (
         f"Research question: {research_question}\n\n"
-        f"Produce exactly {n} sub-queries as a JSON array."
+        f"Output ONLY a raw JSON array with exactly {n} objects. No markdown, no explanation."
     )

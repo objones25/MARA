@@ -14,6 +14,7 @@ import pytest
 from mara.agent.nodes.claim_extractor import (
     _format_leaves,
     _parse_claims,
+    _recover_partial_json_array,
     claim_extractor,
 )
 from mara.config import ResearchConfig
@@ -155,6 +156,33 @@ class TestParseClaims:
         with pytest.raises(ValueError, match="Expected a JSON array"):
             _parse_claims('{"text": "oops", "source_indices": [0]}')
 
+    def test_recovers_from_truncated_array(self):
+        # Simulate the LLM hitting its token budget mid-array
+        complete = json.dumps([
+            {"text": "claim A", "source_indices": [0]},
+            {"text": "claim B", "source_indices": [1]},
+        ])
+        truncated = complete[:-5]  # chop the tail: valid items exist before cutoff
+        result = _parse_claims(truncated)
+        assert len(result) >= 1
+        assert result[0]["text"] == "claim A"
+
+    def test_recover_partial_returns_complete_items_only(self):
+        # Two complete objects followed by a truncated third
+        text = '[{"text": "a", "source_indices": [0]}, {"text": "b", "source_indices": [1]}, {"text": "trun'
+        result = _recover_partial_json_array(text)
+        assert len(result) == 2
+        assert result[0]["text"] == "a"
+        assert result[1]["text"] == "b"
+
+    def test_recover_partial_empty_array(self):
+        assert _recover_partial_json_array("[]") == []
+
+    def test_raises_when_truncated_but_no_complete_items(self):
+        # Array starts but first item is already truncated — nothing to recover
+        with pytest.raises(json.JSONDecodeError):
+            _parse_claims('[{"text": "trun')
+
     def test_preserves_claim_order(self):
         claims = [{"text": f"claim {i}", "source_indices": [i]} for i in range(4)]
         result = _parse_claims(json.dumps(claims))
@@ -221,7 +249,8 @@ class TestClaimExtractorNode:
         mock_llm = self._mock_llm(mocker, _claims_json())
         await claim_extractor(make_mara_state(retrieved_leaves=[leaf]), config={})
         messages = mock_llm.ainvoke.call_args.args[0]
-        assert messages[0]["content"] == build_system_prompt("2026-03-20")
+        from mara.config import ResearchConfig
+        assert messages[0]["content"] == build_system_prompt("2026-03-20", ResearchConfig(leaf_db_enabled=False).max_extracted_claims)
 
     async def test_user_message_contains_leaf_text(self, mocker, make_mara_state, make_merkle_leaf):
         leaf = make_merkle_leaf(index=0, text="unique leaf content xyz")
@@ -268,7 +297,7 @@ class TestClaimExtractorNode:
         )
         state = make_mara_state(retrieved_leaves=[make_merkle_leaf(index=0)], config=cfg)
         await claim_extractor(state, config={})
-        mock_make_llm.assert_called_once_with("Qwen/Qwen3-32B", "my-token", 4096, "featherless-ai")
+        mock_make_llm.assert_called_once_with("Qwen/Qwen3-32B", "my-token", cfg.claim_extractor_max_tokens, "featherless-ai", cfg.temperature, cfg.top_p, cfg.top_k, cfg.presence_penalty)
 
     async def test_handles_fenced_llm_response(self, mocker, make_mara_state, make_merkle_leaf):
         leaf = make_merkle_leaf(index=0)

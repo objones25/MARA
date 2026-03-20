@@ -186,7 +186,7 @@ class TestQueryPlannerNode:
             leaf_db_enabled=False,
         )
         await query_planner(make_mara_state(config=cfg), config={})
-        mock_make_llm.assert_called_once_with("Qwen/Qwen3-30B-A3B-Instruct-2507", "my-hf-token", 1024, "featherless-ai")
+        mock_make_llm.assert_called_once_with("Qwen/Qwen3-30B-A3B-Instruct-2507", "my-hf-token", cfg.query_planner_max_tokens, "featherless-ai", cfg.temperature, cfg.top_p, cfg.top_k, cfg.presence_penalty)
 
     async def test_uses_config_api_key(self, mocker, make_mara_state):
         mock_make_llm = mocker.patch("mara.agent.nodes.query_planner.make_llm")
@@ -204,7 +204,7 @@ class TestQueryPlannerNode:
             leaf_db_enabled=False,
         )
         await query_planner(make_mara_state(config=cfg), config={})
-        _, called_api_key, _, _ = mock_make_llm.call_args.args
+        _, called_api_key, *_ = mock_make_llm.call_args.args
         assert called_api_key == "secret-token"
 
     async def test_invokes_llm_with_system_and_user_messages(self, mocker, make_mara_state):

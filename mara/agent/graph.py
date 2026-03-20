@@ -7,9 +7,13 @@ Node sequence
         → [arxiv_worker  × N]   (fan-out via Send API — ArXiv API + Firecrawl)
         → source_hasher
         → merkle_builder
+        → retriever
         → claim_extractor
         → confidence_scorer
-        → hitl_checkpoint       (auto-approves high-confidence; interrupts for low)
+        → [route_after_scoring]
+            → corrective_retriever  (if failing claims and loop budget remains)
+                → merkle_builder    (back-edge: re-runs full pipeline on expanded pool)
+            → hitl_checkpoint       (auto-approves high-confidence; interrupts for low)
         → report_synthesizer
         → certified_output
         → END
@@ -40,6 +44,7 @@ from mara.agent.edges.routing import dispatch_search_workers, route_after_scorin
 from mara.agent.nodes.certified_output import certified_output
 from mara.agent.nodes.claim_extractor import claim_extractor
 from mara.agent.nodes.confidence_scorer import confidence_scorer
+from mara.agent.nodes.corrective_retriever import corrective_retriever
 from mara.agent.nodes.hitl_checkpoint import hitl_checkpoint
 from mara.agent.nodes.merkle_builder import merkle_builder
 from mara.agent.nodes.query_planner import query_planner
@@ -85,6 +90,7 @@ def build_graph(checkpointer=None, config_schemas=None):
     builder.add_node("retriever", retriever)
     builder.add_node("claim_extractor", claim_extractor)
     builder.add_node("confidence_scorer", confidence_scorer)
+    builder.add_node("corrective_retriever", corrective_retriever)
     builder.add_node("hitl_checkpoint", hitl_checkpoint)
     builder.add_node("report_synthesizer", report_synthesizer)
     builder.add_node("certified_output", certified_output)
@@ -105,8 +111,14 @@ def build_graph(checkpointer=None, config_schemas=None):
     builder.add_edge("retriever", "claim_extractor")
     builder.add_edge("claim_extractor", "confidence_scorer")
 
-    # Confidence routing (currently always → hitl_checkpoint)
-    builder.add_conditional_edges("confidence_scorer", route_after_scoring)
+    # Confidence routing → corrective_retriever or hitl_checkpoint
+    builder.add_conditional_edges(
+        "confidence_scorer", route_after_scoring, ["corrective_retriever", "hitl_checkpoint"]
+    )
+
+    # Back-edge: corrective_retriever → merkle_builder (skips source_hasher;
+    # corrective_retriever appends leaves directly to merkle_leaves)
+    builder.add_edge("corrective_retriever", "merkle_builder")
 
     # Terminal pipeline
     builder.add_edge("hitl_checkpoint", "report_synthesizer")

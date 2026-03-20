@@ -170,16 +170,27 @@ class TestReportSynthesizerNode:
         assert "human claim" in user_msg
         assert "scored claim" not in user_msg
 
-    async def test_falls_back_to_scored_when_human_approved_empty(self, mocker, make_mara_state, make_merkle_leaf):
+    async def test_falls_back_to_scored_when_human_approved_is_none(self, mocker, make_mara_state, make_merkle_leaf):
+        """None sentinel means HITL never ran — fall back to scored_claims."""
         leaf = make_merkle_leaf(index=0)
         mock_llm_obj = _mock_llm(mocker, "report")
         scored = [_SC("scored claim", 0.90, [0])]
         await report_synthesizer(
-            make_mara_state(scored_claims=scored, human_approved_claims=[], retrieved_leaves=[leaf]),
+            make_mara_state(scored_claims=scored, human_approved_claims=None, retrieved_leaves=[leaf]),
             config={},
         )
         user_msg = mock_llm_obj.ainvoke.call_args.args[0][1]["content"]
         assert "scored claim" in user_msg
+
+    async def test_empty_human_approved_not_overridden_by_scored(self, mocker, make_mara_state, make_merkle_leaf):
+        """Empty list means HITL ran and approved nothing — do not fall back."""
+        mocker.patch("mara.agent.nodes.report_synthesizer.make_llm")
+        scored = [_SC("scored claim", 0.90, [0])]
+        result = await report_synthesizer(
+            make_mara_state(scored_claims=scored, human_approved_claims=[], retrieved_leaves=[]),
+            config={},
+        )
+        assert result == {"report_draft": ""}
 
     async def test_query_included_in_user_message(self, mocker, make_mara_state):
         mock_llm_obj = _mock_llm(mocker, "report")

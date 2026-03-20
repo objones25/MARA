@@ -66,7 +66,7 @@ async def report_synthesizer(state: MARAState, config: RunnableConfig) -> dict:
     Returns:
         ``{"report_draft": str}``
     """
-    claims = state["human_approved_claims"] or state["scored_claims"]
+    claims = state["human_approved_claims"] if state["human_approved_claims"] is not None else state["scored_claims"]
     leaves = state["retrieved_leaves"]
     query = state["query"]
 
@@ -77,7 +77,7 @@ async def report_synthesizer(state: MARAState, config: RunnableConfig) -> dict:
         return {"report_draft": ""}
 
     research_config = state["config"]
-    llm = make_llm(research_config.model, research_config.hf_token, 8192, research_config.hf_provider)
+    llm = make_llm(research_config.model, research_config.hf_token, research_config.report_synthesizer_max_tokens, research_config.hf_provider, research_config.temperature, research_config.top_p, research_config.top_k, research_config.presence_penalty)
 
     formatted = _format_claims(claims, leaves)
     messages = [

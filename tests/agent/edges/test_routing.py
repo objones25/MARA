@@ -3,8 +3,9 @@
 Tests cover:
   - dispatch_search_workers: returns one Send per sub_query, correct target
     node name, correct payload shape (sub_query, research_config, empty lists)
-  - route_after_scoring: always returns "hitl_checkpoint" regardless of
-    claim confidence distribution
+  - route_after_scoring: routes to "corrective_retriever" when there are
+    failing claims (low confidence, small n_leaves) and loop budget remains;
+    routes to "hitl_checkpoint" otherwise (all approved, contested, loop cap).
 """
 
 from dataclasses import dataclass
@@ -13,6 +14,7 @@ from langgraph.types import Send
 
 from mara.agent.edges.routing import dispatch_search_workers, route_after_scoring
 from mara.agent.state import SubQuery
+from mara.config import ResearchConfig
 
 
 # ---------------------------------------------------------------------------
@@ -25,6 +27,7 @@ class _SC:
     text: str
     confidence: float
     source_indices: list
+    n_leaves: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -137,25 +140,85 @@ class TestRouteAfterScoring:
     def test_returns_string(self, make_mara_state):
         assert isinstance(route_after_scoring(make_mara_state()), str)
 
-    def test_returns_hitl_checkpoint(self, make_mara_state):
-        assert route_after_scoring(make_mara_state()) == "hitl_checkpoint"
-
     def test_empty_scored_claims_returns_hitl(self, make_mara_state):
         assert route_after_scoring(make_mara_state(scored_claims=[])) == "hitl_checkpoint"
 
     def test_high_confidence_claims_returns_hitl(self, make_mara_state):
-        claims = [_SC("c", 0.95, []), _SC("d", 0.90, [])]
+        # All approved — no failing claims
+        claims = [_SC("c", 0.95, [], n_leaves=5), _SC("d", 0.90, [], n_leaves=5)]
         assert route_after_scoring(make_mara_state(scored_claims=claims)) == "hitl_checkpoint"
 
-    def test_low_confidence_claims_returns_hitl(self, make_mara_state):
-        claims = [_SC("c", 0.10, []), _SC("d", 0.20, [])]
-        assert route_after_scoring(make_mara_state(scored_claims=claims)) == "hitl_checkpoint"
+    def test_failing_claims_within_loop_budget_returns_corrective(self, make_mara_state):
+        # Low confidence, small n_leaves, loop_count < max (default max=2)
+        claims = [_SC("c", 0.10, [], n_leaves=5)]
+        state = make_mara_state(scored_claims=claims, loop_count=0)
+        assert route_after_scoring(state) == "corrective_retriever"
 
-    def test_mixed_confidence_returns_hitl(self, make_mara_state):
-        claims = [_SC("high", 0.95, []), _SC("low", 0.20, [])]
-        assert route_after_scoring(make_mara_state(scored_claims=claims)) == "hitl_checkpoint"
-
-    def test_max_loops_reached_returns_hitl(self, make_mara_state):
-        claims = [_SC("c", 0.10, [])]
+    def test_failing_claims_at_loop_cap_returns_hitl(self, make_mara_state):
+        # loop_count == max_corrective_rag_loops (2) → no budget left
+        claims = [_SC("c", 0.10, [], n_leaves=5)]
         state = make_mara_state(scored_claims=claims, loop_count=2)
+        assert route_after_scoring(state) == "hitl_checkpoint"
+
+    def test_failing_claims_exceed_loop_cap_returns_hitl(self, make_mara_state):
+        claims = [_SC("c", 0.10, [], n_leaves=5)]
+        state = make_mara_state(scored_claims=claims, loop_count=99)
+        assert route_after_scoring(state) == "hitl_checkpoint"
+
+    def test_contested_claims_only_returns_hitl(self, make_mara_state):
+        # n_leaves >= n_leaves_contested_threshold (default=15) → contested, not failing
+        cfg = ResearchConfig(leaf_db_enabled=False)
+        claims = [_SC("c", 0.10, [], n_leaves=cfg.n_leaves_contested_threshold)]
+        state = make_mara_state(scored_claims=claims, config=cfg, loop_count=0)
+        assert route_after_scoring(state) == "hitl_checkpoint"
+
+    def test_mixed_failing_and_contested_returns_corrective(self, make_mara_state):
+        # One contested (large n) + one failing (small n) → still has failing → corrective
+        cfg = ResearchConfig(leaf_db_enabled=False)
+        claims = [
+            _SC("contested", 0.10, [], n_leaves=cfg.n_leaves_contested_threshold),
+            _SC("failing", 0.10, [], n_leaves=5),
+        ]
+        state = make_mara_state(scored_claims=claims, config=cfg, loop_count=0)
+        assert route_after_scoring(state) == "corrective_retriever"
+
+    def test_mixed_high_and_failing_returns_corrective(self, make_mara_state):
+        # One high-confidence + one failing → corrective fires
+        claims = [_SC("high", 0.95, [], n_leaves=20), _SC("low", 0.20, [], n_leaves=5)]
+        state = make_mara_state(scored_claims=claims, loop_count=0)
+        assert route_after_scoring(state) == "corrective_retriever"
+
+    def test_custom_loop_budget_respected(self, make_mara_state):
+        cfg = ResearchConfig(max_corrective_rag_loops=3, leaf_db_enabled=False)
+        claims = [_SC("c", 0.10, [], n_leaves=5)]
+        # loop_count=2 < max=3 → corrective
+        state = make_mara_state(scored_claims=claims, config=cfg, loop_count=2)
+        assert route_after_scoring(state) == "corrective_retriever"
+        # loop_count=3 == max=3 → hitl
+        state = make_mara_state(scored_claims=claims, config=cfg, loop_count=3)
+        assert route_after_scoring(state) == "hitl_checkpoint"
+
+    def test_custom_n_leaves_contested_threshold(self, make_mara_state):
+        cfg = ResearchConfig(n_leaves_contested_threshold=5, leaf_db_enabled=False)
+        # n_leaves=5 >= threshold=5 → contested, no failing
+        claims = [_SC("c", 0.10, [], n_leaves=5)]
+        state = make_mara_state(scored_claims=claims, config=cfg, loop_count=0)
+        assert route_after_scoring(state) == "hitl_checkpoint"
+        # n_leaves=4 < threshold=5 → failing
+        claims = [_SC("c", 0.10, [], n_leaves=4)]
+        state = make_mara_state(scored_claims=claims, config=cfg, loop_count=0)
+        assert route_after_scoring(state) == "corrective_retriever"
+
+    def test_confidence_at_low_threshold_not_failing(self, make_mara_state):
+        # confidence == low_confidence_threshold (0.55) → not failing (strict <)
+        cfg = ResearchConfig(leaf_db_enabled=False)
+        claims = [_SC("c", cfg.low_confidence_threshold, [], n_leaves=5)]
+        state = make_mara_state(scored_claims=claims, config=cfg, loop_count=0)
+        assert route_after_scoring(state) == "hitl_checkpoint"
+
+    def test_loop_count_zero_budget_zero_returns_hitl(self, make_mara_state):
+        # max_corrective_rag_loops=0 means no loops allowed
+        cfg = ResearchConfig(max_corrective_rag_loops=0, leaf_db_enabled=False)
+        claims = [_SC("c", 0.10, [], n_leaves=5)]
+        state = make_mara_state(scored_claims=claims, config=cfg, loop_count=0)
         assert route_after_scoring(state) == "hitl_checkpoint"

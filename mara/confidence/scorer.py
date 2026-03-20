@@ -34,6 +34,8 @@ class ScoredClaim:
         corroborating:  k — leaves whose similarity exceeds the threshold.
         n_leaves:       N — total leaves evaluated.
         similarities:   Raw cosine similarities (for diagnostics / HITL display).
+        contested:      True when SA is low but n >= n_leaves_contested_threshold,
+                        meaning sources exist but disagree rather than being absent.
     """
 
     text: str
@@ -42,6 +44,7 @@ class ScoredClaim:
     corroborating: int
     n_leaves: int
     similarities: list[float] = field(default_factory=list)
+    contested: bool = False
 
 
 def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:

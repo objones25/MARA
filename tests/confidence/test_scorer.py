@@ -112,10 +112,10 @@ class TestScoreClaimWithLeaves:
         assert result.corroborating == expected_k
 
     def test_confidence_equals_beta_binomial(self, config):
-        """confidence must equal (1 + k) / (2 + n) exactly."""
+        """confidence must equal (1 + k) / (2 + k) exactly."""
         leaves = ["text one", "text two", "text three"]
         result = score_claim("A claim.", leaves, [0], config)
-        expected = (1 + result.corroborating) / (2 + result.n_leaves)
+        expected = (1 + result.corroborating) / (2 + result.corroborating)
         assert result.confidence == pytest.approx(expected)
 
     def test_source_indices_preserved(self, config):

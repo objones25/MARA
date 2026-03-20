@@ -123,9 +123,8 @@ async def firecrawl_scrape(state: SearchWorkerState, config: RunnableConfig) -> 
         url: str = doc.metadata.source_url if doc.metadata else ""
         if not url or not markdown:
             continue
-        for chunk in _chunk_text(
-            markdown, research_config.chunk_size, research_config.chunk_overlap
-        ):
+        doc_chunks = _chunk_text(markdown, research_config.chunk_size, research_config.chunk_overlap)
+        for chunk in doc_chunks:
             raw_chunks.append(
                 SourceChunk(
                     url=url,
@@ -134,6 +133,7 @@ async def firecrawl_scrape(state: SearchWorkerState, config: RunnableConfig) -> 
                     sub_query=sub_query_text,
                 )
             )
+        _log.debug("Scraped %s → %d chunk(s)", url, len(doc_chunks))
 
-    _log.debug("Produced %d chunk(s) from:\n%s", len(raw_chunks), "\n".join(f"  {u}" for u in urls))
+    _log.debug("Produced %d chunk(s) total", len(raw_chunks))
     return {"raw_chunks": raw_chunks}

@@ -212,13 +212,16 @@ class MARAState(TypedDict):
     # ---- Confidence Scorer output ----
     extracted_claims: list[Claim]
     scored_claims: list[Any]       # list[ScoredClaim] — dataclass, tightened later
-    human_approved_claims: list[Any]  # list[ScoredClaim] — set by HITL node
+    human_approved_claims: list[Any] | None  # list[ScoredClaim] — set by HITL node; None until HITL runs
 
     # ---- Report Synthesizer output ----
     report_draft: str
 
     # ---- Certified Output ----
     certified_report: CertifiedReport | None
+
+    # ---- Corrective RAG ----
+    corrective_sub_queries: list[SubQuery]   # LLM-generated queries per failing claim
 
     # ---- Internal ----
     messages: Annotated[list, add_messages]
