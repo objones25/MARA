@@ -23,9 +23,10 @@
     - [6. Confidence Scorer](#6-confidence-scorer)
       - [The scoring model](#the-scoring-model)
       - [Routing based on confidence](#routing-based-on-confidence)
-    - [7. HITL Checkpoint](#7-hitl-checkpoint)
-    - [8. Report Synthesizer](#8-report-synthesizer)
-    - [9. Certified Output](#9-certified-output)
+    - [7. Corrective Retriever](#7-corrective-retriever)
+    - [8. HITL Checkpoint](#8-hitl-checkpoint)
+    - [9. Report Synthesizer](#9-report-synthesizer)
+    - [10. Certified Output](#10-certified-output)
   - [The Merkle Integrity Protocol](#the-merkle-integrity-protocol)
   - [Leaf Database](#leaf-database)
     - [Freshness cache](#freshness-cache)
@@ -115,7 +116,7 @@ Current mitigations — RAG, chain-of-thought, temperature reduction — reduce 
 
 ## Architecture
 
-The agent is implemented as a directed `StateGraph` in LangGraph. Control flows through eleven nodes, some of which fan out into parallel subgraphs using the `Send` API. The Merkle integrity layer is a data structure — not a separate node — that is built incrementally as sources are hashed and committed into the agent state.
+The agent is implemented as a directed `StateGraph` in LangGraph. Control flows through twelve nodes, some of which fan out into parallel subgraphs using the `Send` API. The Merkle integrity layer is a data structure — not a separate node — that is built incrementally as sources are hashed and committed into the agent state.
 
 ```
 ┌────────────────────────────────────────────────────────────────┐
@@ -129,27 +130,33 @@ The agent is implemented as a directed `StateGraph` in LangGraph. Control flows 
 │  [arxiv_worker  ×N] ──┘  dispatched per sub-query             │
 │       │  (arxiv_search → firecrawl)                           │
 │       ▼  (fan-in via operator.add on raw_chunks)              │
-│  [Source Hasher]  →  [Merkle Builder]                         │
-│                             │                                  │
-│                             ▼                                  │
-│                     [Retriever]                                │
-│                      BM25 + semantic RRF → top-K leaves        │
-│                             │                                  │
-│                             ▼                                  │
-│                    [Claim Extractor]                           │
-│                             │                                  │
-│                             ▼                                  │
-│                   [Confidence Scorer]                          │
-│                             │                                  │
-│                             ▼                                  │
-│                   [HITL Checkpoint]                            │
-│                    auto-approve high conf;                     │
-│                    interrupt() for low conf                    │
-│                             │                                  │
-│                             ▼                                  │
-│                  [Report Synthesizer]                          │
-│                             │                                  │
-│                  [Certified Output] ◄── Merkle root            │
+│  [Source Hasher]  →  [Merkle Builder] ◄────────────────┐      │
+│                             │                           │      │
+│                             ▼                           │      │
+│                     [Retriever]                         │      │
+│                      BM25 + semantic RRF → top-K leaves │      │
+│                             │                           │      │
+│                             ▼                           │      │
+│                    [Claim Extractor]                    │      │
+│                             │                           │      │
+│                             ▼                           │      │
+│                   [Confidence Scorer]                   │      │
+│                             │                           │      │
+│              ┌──────────────┴──────────────┐            │      │
+│              │ route_after_scoring         │            │      │
+│              ▼                            ▼            │      │
+│  [Corrective Retriever]         [HITL Checkpoint]      │      │
+│   (low conf + few leaves)        auto-approve high;    │      │
+│   LLM sub-queries + scrape       interrupt() for low   │      │
+│              │                            │            │      │
+│              └────────────────────────────┘            │      │
+│              (back-edge: corrective_retriever ──────────┘      │
+│               skips source_hasher; re-enters merkle_builder)   │
+│                                           │                    │
+│                                           ▼                    │
+│                                [Report Synthesizer]            │
+│                                           │                    │
+│                                [Certified Output] ◄─ root      │
 └────────────────────────────────────────────────────────────────┘
 ```
 
@@ -346,32 +353,69 @@ async def retriever(state: MARAState, config: RunnableConfig) -> dict:
 
 #### The scoring model
 
-The confidence score for claim `c` is the **Beta-Binomial posterior mean** over all retrieved leaves:
+The confidence score for claim `c` is the **Beta-Binomial posterior mean** updated only on corroborating leaves:
 
 ```
-confidence(c) = SA(c) = (1 + k) / (2 + n)
+confidence(c) = SA(c) = (1 + k) / (2 + k)
 ```
 
-where `k` is the number of retrieved leaves whose cosine similarity to the claim exceeds `similarity_support_threshold` (default τ = 0.72), and `n` is the total number of retrieved leaves.
+where `k` is the number of retrieved leaves whose cosine similarity to the claim exceeds `similarity_support_threshold` (default τ = 0.85).
 
-This is the Laplace-smoothed estimator from a `Beta(1, 1)` prior — a standard Bayesian approach for estimating a proportion from count data. It avoids boundary values of 0 and 1: "zero supporting leaves from a small sample" is not treated with the same certainty as "zero supporting leaves from a large sample." The score is always in the open interval (0, 1).
+Non-corroborating leaves — those that do not mention or contradict the claim — are excluded from the denominator entirely. Their silence is not evidence of contradiction; they are simply irrelevant to that claim. Only positive corroboration moves the score.
 
-Similarities are computed between `SentenceTransformer("all-MiniLM-L6-v2")` embeddings of the claim and all retrieved leaf texts.
+This is the Laplace-smoothed estimator from a `Beta(1, 1)` prior (uniform / maximum uncertainty):
+
+- 0 corroborating leaves → SA = 0.5 (prior mean; maximum uncertainty)
+- 1 corroborating leaf   → SA = 0.67
+- 3 corroborating leaves → SA = 0.80 (clears `high_confidence_threshold`)
+- k → ∞                 → SA → 1.0 (never exactly reached)
+
+The score is always in the open interval (0, 1). Similarities are computed between `SentenceTransformer("all-MiniLM-L6-v2")` embeddings of the claim and each retrieved leaf text.
 
 #### Routing based on confidence
 
-All claims route through `hitl_checkpoint`, which applies `high_confidence_threshold` internally:
+After scoring, `route_after_scoring` distinguishes two low-confidence cases:
+
+| Condition | Interpretation | Route |
+|---|---|---|
+| confidence ≥ `high_confidence_threshold` | Well-supported | auto-approve at HITL |
+| confidence < `low_confidence_threshold` AND `n_leaves < n_leaves_contested_threshold` | **Insufficient data** — not enough sources | `corrective_retriever` (if loops remain) |
+| confidence < `low_confidence_threshold` AND `n_leaves ≥ n_leaves_contested_threshold` | **Contested** — sources exist but disagree | `hitl_checkpoint` (flagged `contested=True`) |
 
 ```
-confidence ≥ 0.80  →  auto-approved
-confidence < 0.80  →  HITL interrupt: human review required
+confidence ≥ 0.80                          →  auto-approved at HITL
+confidence < 0.55, few leaves, loops left  →  corrective_retriever → re-score
+confidence < 0.55, many leaves             →  hitl_checkpoint (contested)
+loop cap reached                           →  hitl_checkpoint
 ```
 
 ---
 
-### 7. HITL Checkpoint
+### 7. Corrective Retriever
 
-**Role:** When one or more claims score below the confidence floor, the graph pauses execution using LangGraph's `interrupt()` mechanism and surfaces the problematic claims to a human reviewer.
+**Role:** When claims have low confidence due to _insufficient data_ (few corroborating leaves, not genuine source disagreement), this node acquires targeted new evidence and re-runs the full scoring pipeline on the expanded leaf pool.
+
+**Step 1 — Identify failing claims:** Claims where `confidence < low_confidence_threshold` AND `n_leaves < n_leaves_contested_threshold`. Contested claims (large `n_leaves`, low confidence) are routed directly to HITL — they have enough data, the sources just disagree.
+
+**Step 2 — Generate corrective sub-queries:** The LLM generates 1–2 targeted search queries per failing claim, focused on finding specific supporting or contradicting evidence.
+
+**Step 3 — DB-first retrieval:** Before scraping, the node queries the leaf database with BM25 full-text search across _all previous runs_ (not just the current one). Cross-run retrieval amortises scraping cost: a claim that appeared in a previous session may already have ample evidence in the corpus.
+
+**Step 4 — Live scraping (if DB insufficient):** If the DB yields fewer than `3 × len(failing)` new leaves, Brave + Firecrawl fire for each corrective sub-query. New pages are capped at `max_new_pages_per_round` per sub-query to limit credit burn. New leaves are upserted to the DB and linked to the current run.
+
+**Step 5 — Re-enter at `merkle_builder`:** The node appends new leaves directly to `merkle_leaves` and returns, routing to `merkle_builder` via a back-edge. The full pipeline (`merkle_builder → retriever → claim_extractor → confidence_scorer`) re-runs on the expanded corpus. `source_hasher` is skipped — corrective leaves are pre-hashed here.
+
+The loop repeats up to `max_corrective_rag_loops` times (default: 2). After the cap, all remaining low-confidence claims go to HITL regardless.
+
+---
+
+### 8. HITL Checkpoint
+
+**Role:** When claims have been through all corrective rounds (or were contested from the start), the graph pauses using LangGraph's `interrupt()` mechanism and surfaces them for human review.
+
+**Contested flagging:** Before presenting claims for review, any claim with `confidence < low_confidence_threshold` AND `n_leaves ≥ n_leaves_contested_threshold` is flagged `contested=True`. This signals to the reviewer that sources were found but disagree — not that evidence was simply absent.
+
+**Confidence stats:** At entry, the node logs mean, median, std dev, min, and max confidence across all scored claims, giving an at-a-glance picture of the overall evidence quality before the review begins.
 
 The checkpoint presents each claim below `high_confidence_threshold` with its confidence score and source indices. The human enters a comma-separated list of indices to approve; the rest are dropped.
 
@@ -403,9 +447,9 @@ This is implemented using LangGraph's `interrupt()` + `Command(resume=...)` patt
 
 ---
 
-### 8. Report Synthesizer
+### 9. Report Synthesizer
 
-**Role:** Receives the human-approved claims along with the `retrieved_leaves` set and synthesises a coherent prose report with inline citations.
+**Role:** Receives the approved claims along with the `retrieved_leaves` set and synthesises a coherent prose report with inline citations. Uses `human_approved_claims` when the HITL node ran; falls back to `scored_claims` when `human_approved_claims` is `None` (HITL never executed — all claims were within the corrective loop and none reached the checkpoint).
 
 Each citation in the report is not a simple URL — it is a structured reference that includes the Merkle leaf index:
 
@@ -419,7 +463,7 @@ The synthesizer is prompted to reference claims by their leaf index rather than 
 
 ---
 
-### 9. Certified Output
+### 10. Certified Output
 
 **Role:** The final node. It assembles the research report, the complete Merkle tree (all leaf hashes, all intermediate hashes, the root hash), the Merkle proofs for each cited leaf, and the full LangSmith run URL into a single `CertifiedReport` object.
 
@@ -596,7 +640,7 @@ Any retrieval improvement must still produce deterministic chunks that can be ha
 
 ### Model framing
 
-The confidence score is the Beta-Binomial posterior mean (SA), covered in full in the Confidence Scorer node section above. SA is the posterior mean of a `Beta(1 + k, 1 + n − k)` distribution, where `k` leaves out of `n` retrieved exceed the cosine similarity threshold. This is a principled, well-established Bayesian estimator for proportions that requires no training data and produces appropriate uncertainty for small sample sizes.
+The confidence score is the Beta-Binomial posterior mean (SA), covered in full in the Confidence Scorer node section above. SA is updated with `k` successes only — non-corroborating leaves are excluded from the denominator because their silence is not evidence of contradiction. The posterior mean `(1 + k) / (2 + k)` is equivalent to starting from a `Beta(1, 1)` prior (uniform, maximum uncertainty) and observing `k` corroborations with no denominator penalty for irrelevant leaves. This is a principled, well-established Bayesian estimator that requires no training data and produces appropriate uncertainty for small sample sizes.
 
 ### Claim extraction
 
@@ -647,13 +691,16 @@ class MARAState(TypedDict):
     scored_claims: list[Any]           # list[ScoredClaim] dataclass
 
     # ---- HITL output ----
-    human_approved_claims: list[Any]   # list[ScoredClaim] — approved by human or auto
+    human_approved_claims: list[Any] | None  # None until HITL runs; [] if HITL ran but approved nothing
 
     # ---- Synthesizer output ----
     report_draft: str
 
     # ---- Final output ----
     certified_report: CertifiedReport | None
+
+    # ---- Corrective RAG ----
+    corrective_sub_queries: list[SubQuery]   # LLM-generated queries per failing claim
 
     # ---- Internal ----
     messages: Annotated[list, add_messages]
@@ -865,10 +912,17 @@ MARA_HIGH_CONFIDENCE_THRESHOLD=0.80
 | `brave_freshness`              | `""`                               | Optional freshness filter: `pd` (24h), `pw` (7d), `pm` (31d), `py` (1y), or `YYYY-MM-DDtoYYYY-MM-DD` |
 | `max_retrieval_candidates`     | `150`                              | Retrieval pool size; reserve for future reranking stage                                              |
 | `max_claim_sources`            | `50`                               | Leaves passed to claim extraction after retrieval (≤ candidates)                                     |
-| `max_corrective_rag_loops`     | `2`                                | Max corrective RAG retries per low-confidence claim                                                  |
-| `high_confidence_threshold`    | `0.80`                             | Composite score above which claims are auto-approved                                                 |
-| `low_confidence_threshold`     | `0.55`                             | Composite score below which claims go to HITL                                                        |
-| `similarity_support_threshold` | `0.72`                             | Cosine similarity for a source to "support" a claim                                                  |
+| `max_extracted_claims`         | `100`                              | Maximum claims the LLM extracts per run (injected into the prompt)                                   |
+| `max_corrective_rag_loops`     | `2`                                | Max corrective RAG retries before routing to HITL                                                    |
+| `n_leaves_contested_threshold` | `15`                               | `n_leaves ≥` this with low SA → contested (sources disagree), not insufficient data                  |
+| `max_new_pages_per_round`      | `5`                                | Max new pages scraped per corrective sub-query per round                                             |
+| `high_confidence_threshold`    | `0.80`                             | SA score above which claims are auto-approved                                                        |
+| `low_confidence_threshold`     | `0.55`                             | SA score below which claims trigger corrective retrieval or HITL                                     |
+| `similarity_support_threshold` | `0.85`                             | Cosine similarity (exclusive) for a leaf to count as corroborating a claim                          |
+| `query_planner_max_tokens`     | `1024`                             | Max new tokens for the query planner LLM call                                                        |
+| `claim_extractor_max_tokens`   | `16384`                            | Max new tokens for the claim extractor LLM call                                                      |
+| `report_synthesizer_max_tokens`| `8192`                             | Max new tokens for the report synthesizer LLM call                                                   |
+| `corrective_retriever_max_tokens` | `512`                           | Max new tokens for corrective sub-query generation per failing claim                                 |
 | `hash_algorithm`               | `sha256`                           | Hash function for Merkle leaves (extensible)                                                         |
 | `chunk_size`                   | `1000`                             | Fixed character chunk size for source text splitting                                                 |
 | `chunk_overlap`                | `200`                              | Character overlap between consecutive chunks                                                         |
@@ -884,7 +938,7 @@ MARA_HIGH_CONFIDENCE_THRESHOLD=0.80
 ```
 mara/
 ├── agent/
-│   ├── graph.py              # StateGraph definition and compilation (10 nodes)
+│   ├── graph.py              # StateGraph definition and compilation (12 nodes)
 │   ├── state.py              # MARAState TypedDict and all shared data classes
 │   ├── nodes/
 │   │   ├── query_planner.py      # Sub-query decomposition node
@@ -896,13 +950,14 @@ mara/
 │   │   ├── source_hasher.py      # SHA-256 hash of each chunk; builds and persists Merkle leaves
 │   │   ├── merkle_builder.py     # Assembles MerkleTree from leaf hashes
 │   │   ├── retriever.py          # Hybrid BM25+semantic RRF retrieval: all leaves → top-K
-│   │   ├── claim_extractor.py    # LLM extraction: retrieved text → atomic claims
-│   │   ├── confidence_scorer.py  # Beta-Binomial SA → ScoredClaim for each claim
-│   │   ├── hitl_checkpoint.py    # interrupt() + human approval handling
+│   │   ├── claim_extractor.py    # LLM extraction: retrieved text → atomic claims (capped at max_extracted_claims)
+│   │   ├── confidence_scorer.py  # Beta-Binomial SA (1+k)/(2+k) → ScoredClaim for each claim
+│   │   ├── corrective_retriever.py # DB-first + live scrape for low-confidence claims; back-edge to merkle_builder
+│   │   ├── hitl_checkpoint.py    # Contested flagging + confidence stats + interrupt() + human approval
 │   │   ├── report_synthesizer.py # Approved claims → prose with Merkle leaf citations
 │   │   └── certified_output.py   # Assembles final CertifiedReport; closes DB run
 │   └── edges/
-│       └── routing.py        # dispatch_search_workers (Send fan-out), route_after_scoring
+│       └── routing.py        # dispatch_search_workers (Send fan-out), route_after_scoring (corrective RAG vs HITL)
 ├── db/                       # Persistence layer — repository pattern, SQLite implementation
 │   ├── __init__.py           #   Exports LeafRepository, SQLiteLeafRepository
 │   ├── repository.py         #   LeafRepository Protocol (structural subtyping; Postgres-ready)
@@ -925,8 +980,8 @@ mara/
 ├── logging.py                # get_logger() factory — mara.* logger hierarchy
 └── prompts/
     ├── query_planner.py
-    ├── claim_extractor.py
-    ├── lsa_scorer.py
+    ├── claim_extractor.py        # includes max_extracted_claims injected into system prompt
+    ├── corrective_retriever.py
     └── report_synthesizer.py
 
 tests/
@@ -1164,6 +1219,9 @@ MARA_ARXIV_MAX_RESULTS=5
 MARA_HIGH_CONFIDENCE_THRESHOLD=0.80
 MARA_LOW_CONFIDENCE_THRESHOLD=0.55
 MARA_MAX_CLAIM_SOURCES=50
+MARA_MAX_EXTRACTED_CLAIMS=100
+MARA_MAX_CORRECTIVE_RAG_LOOPS=2
+MARA_N_LEAVES_CONTESTED_THRESHOLD=15
 
 # Leaf database (set to false to run without SQLite)
 MARA_LEAF_DB_PATH=~/.mara/leaves.db
