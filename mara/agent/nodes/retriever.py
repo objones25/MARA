@@ -232,6 +232,11 @@ async def retriever(state: MARAState, config: RunnableConfig) -> dict:
         leaves, model_name, target_dim, leaf_repo, hf_token
     )
 
+    # Cache embeddings for the confidence scorer so it can skip re-embedding.
+    if run_context := configurable.get("run_context"):
+        run_context.leaf_embeddings = leaf_embs
+        run_context.leaf_embedding_hashes = [leaf["hash"] for leaf in leaves]
+
     # Semantic scores: max cosine similarity across all query texts.
     # L2-normalised embeddings → dot product == cosine similarity.
     semantic_scores = (leaf_embs @ query_embs.T).max(axis=1)

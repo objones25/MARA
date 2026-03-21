@@ -1,6 +1,6 @@
 """Confidence scorer: scores a claim via Beta-Binomial Source Agreement.
 
-score_claim embeds the claim against ALL retrieved leaves and applies the
+score_claim takes pre-computed embedding vectors and applies the
 Beta-Binomial posterior mean (1 + k) / (2 + k) as the confidence score,
 where k is the number of *unique source URLs* that corroborate the claim.
 
@@ -11,6 +11,12 @@ Why source-deduplicated k?
   threshold restores the intended semantics: k = number of independent sources
   that agree with the claim.
 
+Why pre-computed embeddings?
+  score_claim is called once per claim in a tight loop. Embedding all leaves
+  once at the node level (rather than inside each score_claim call) reduces
+  SentenceTransformer inference from O(n_claims × n_leaves) to O(n_leaves +
+  n_claims) — two batches instead of n_claims batches.
+
 No LangGraph imports. Pure and testable without a live LLM or graph.
 """
 
@@ -20,7 +26,6 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from mara.confidence.embeddings import embed
 from mara.confidence.signals import compute_sa
 from mara.config import ResearchConfig
 
@@ -32,12 +37,15 @@ class ScoredClaim:
     Attributes:
         text:           The atomic claim text.
         source_indices: Indices of the leaves the claim extractor cited.
-        confidence:     Beta-Binomial posterior mean over all retrieved leaves.
-        corroborating:  k — leaves whose similarity exceeds the threshold.
-        n_leaves:       N — total leaves evaluated.
-        similarities:   Raw cosine similarities (for diagnostics / HITL display).
-        contested:      True when SA is low but n >= n_leaves_contested_threshold,
-                        meaning sources exist but disagree rather than being absent.
+        confidence:     Beta-Binomial posterior mean (1 + k) / (2 + k).
+        corroborating:  k — unique source URLs whose best chunk exceeds the
+                        similarity threshold.
+        n_leaves:       Total leaf chunks evaluated (chunk count, not URL count).
+        n_unique_urls:  Number of distinct source URLs in the scoring pool.
+        similarities:   Raw per-chunk cosine similarities (for diagnostics).
+        contested:      True when SA is low but n_unique_urls >=
+                        n_leaves_contested_threshold, meaning sources exist but
+                        disagree rather than being absent.
     """
 
     text: str
@@ -45,6 +53,7 @@ class ScoredClaim:
     confidence: float
     corroborating: int
     n_leaves: int
+    n_unique_urls: int = 0
     similarities: list[float] = field(default_factory=list)
     contested: bool = False
 
@@ -59,63 +68,56 @@ def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
 
 def score_claim(
     claim_text: str,
-    all_leaf_texts: list[str],
+    claim_embedding: np.ndarray,
+    leaf_embeddings: np.ndarray,
+    leaf_urls: list[str],
     source_indices: list[int],
     config: ResearchConfig,
-    leaf_urls: list[str] | None = None,
 ) -> ScoredClaim:
-    """Score a single claim against all retrieved leaves.
+    """Score a single claim against pre-computed leaf embeddings.
 
-    Embeds the claim and all leaf texts, computes cosine similarities, then
-    applies the Beta-Binomial posterior mean as the confidence score.
+    All embedding computation must be done by the caller before invoking this
+    function.  score_claim itself is pure numpy — no I/O, no model inference.
 
-    When ``leaf_urls`` is provided, k counts unique source URLs (one vote per
-    URL, using the maximum similarity across all chunks from that URL).  This
-    enforces the independence assumption of the Beta-Binomial model.  When
-    ``leaf_urls`` is None, k counts individual chunks (legacy behaviour).
+    Source-deduplication: for each unique URL, only the maximum chunk
+    similarity is retained.  k counts unique URLs above the threshold, not
+    individual chunks.
 
     Args:
-        claim_text:     The claim to score.
-        all_leaf_texts: ALL retrieved leaf texts (not just cited sources).
-        source_indices: Leaf indices the claim extractor attributed the claim to.
-        config:         ResearchConfig driving embedding model and threshold.
-        leaf_urls:      URL for each leaf in ``all_leaf_texts`` (same order).
-                        When provided, enables source-level deduplication of k.
+        claim_text:       Text of the claim (stored on ScoredClaim for display).
+        claim_embedding:  Unit vector of shape (dim,).
+        leaf_embeddings:  Unit matrix of shape (n_leaves, dim).
+        leaf_urls:        URL for each row of leaf_embeddings (same order).
+        source_indices:   Leaf indices attributed to the claim by the extractor.
+        config:           ResearchConfig providing similarity_support_threshold.
 
     Returns:
         A ScoredClaim with confidence in the open interval (0, 1).
     """
     threshold = config.similarity_support_threshold
 
-    if not all_leaf_texts:
+    if leaf_embeddings.shape[0] == 0:
         return ScoredClaim(
             text=claim_text,
             source_indices=source_indices,
             confidence=compute_sa([], threshold),  # Beta(1,1) prior = 0.5
             corroborating=0,
             n_leaves=0,
+            n_unique_urls=0,
             similarities=[],
         )
 
-    all_embeddings = embed([claim_text] + all_leaf_texts, config.embedding_model, config.hf_token)
-    claim_embedding = all_embeddings[0]
-    leaf_embeddings = all_embeddings[1:]
-
-    similarities = [cosine_similarity(claim_embedding, le) for le in leaf_embeddings]
+    similarities = (leaf_embeddings @ claim_embedding).tolist()
     n = len(similarities)
 
-    if leaf_urls is not None:
-        # Source-deduplicated k: one vote per unique URL (max chunk similarity).
-        url_max_sim: dict[str, float] = {}
-        for url, sim in zip(leaf_urls, similarities):
-            if url not in url_max_sim or sim > url_max_sim[url]:
-                url_max_sim[url] = sim
-        per_source_sims = list(url_max_sim.values())
-        k = sum(1 for s in per_source_sims if s > threshold)
-        confidence = compute_sa(per_source_sims, threshold)
-    else:
-        k = sum(1 for s in similarities if s > threshold)
-        confidence = compute_sa(similarities, threshold)
+    # Source-deduplicated k: one vote per unique URL (max chunk similarity).
+    url_max_sim: dict[str, float] = {}
+    for url, sim in zip(leaf_urls, similarities):
+        if url not in url_max_sim or sim > url_max_sim[url]:
+            url_max_sim[url] = sim
+    per_source_sims = list(url_max_sim.values())
+    k = sum(1 for s in per_source_sims if s > threshold)
+    confidence = compute_sa(per_source_sims, threshold)
 
     return ScoredClaim(
         text=claim_text,
@@ -123,5 +125,6 @@ def score_claim(
         confidence=confidence,
         corroborating=k,
         n_leaves=n,
+        n_unique_urls=len(url_max_sim),
         similarities=similarities,
     )

@@ -51,7 +51,7 @@ def dispatch_search_workers(state: MARAState) -> list[Send]:
 def route_after_scoring(state: MARAState) -> str:
     """Route after confidence scoring.
 
-    Claims with low SA and insufficient evidence (n_leaves < n_leaves_contested_threshold)
+    Claims with low SA and insufficient evidence (n_unique_urls < n_leaves_contested_threshold)
     are routed to corrective_retriever to acquire more data, as long as the loop
     cap has not been reached.
 
@@ -69,7 +69,7 @@ def route_after_scoring(state: MARAState) -> str:
     failing = [
         c for c in state["scored_claims"]
         if c.confidence < cfg.low_confidence_threshold
-        and c.n_leaves < cfg.n_leaves_contested_threshold
+        and c.n_unique_urls < cfg.n_leaves_contested_threshold
     ]
     if failing and state["loop_count"] < cfg.max_corrective_rag_loops:
         _log.info(

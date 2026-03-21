@@ -30,6 +30,7 @@ class _SC:
     source_indices: list
     corroborating: int = 0
     n_leaves: int = 0
+    n_unique_urls: int = 0
     similarities: list = None
     contested: bool = False
 
@@ -130,6 +131,7 @@ class TestInterruptCalled:
         assert "confidence" in item
         assert "corroborating" in item
         assert "n_leaves" in item
+        assert "n_unique_urls" in item
         assert "source_indices" in item
         assert "contested" in item
         assert "index" in item
@@ -227,8 +229,8 @@ class TestContestedFlagging:
         )
         from mara.config import ResearchConfig
         cfg = ResearchConfig(leaf_db_enabled=False)
-        # n_leaves >= n_leaves_contested_threshold (default=15) and confidence below low threshold
-        claim = _SC("contested claim", 0.30, [], n_leaves=cfg.n_leaves_contested_threshold)
+        # n_unique_urls >= n_leaves_contested_threshold (default=15) and confidence below low threshold
+        claim = _SC("contested claim", 0.30, [], n_leaves=cfg.n_leaves_contested_threshold, n_unique_urls=cfg.n_leaves_contested_threshold)
         result = hitl_checkpoint(make_mara_state(scored_claims=[claim], config=cfg), config={})
         # The claim ends up in needs_review (below high threshold) — check payload
         payload = mocker.patch("mara.agent.nodes.hitl_checkpoint.interrupt").call_args
@@ -239,7 +241,7 @@ class TestContestedFlagging:
         # The claim object passed to interrupt's needs_review is still a dict,
         # but the actual ScoredClaim sent to human_approved is the replace()'d one.
         # Test via a high-confidence contested claim that gets auto-approved.
-        high_contested = _SC("high contested", 0.90, [], n_leaves=cfg.n_leaves_contested_threshold)
+        high_contested = _SC("high contested", 0.90, [], n_leaves=cfg.n_leaves_contested_threshold, n_unique_urls=cfg.n_leaves_contested_threshold)
         result2 = hitl_checkpoint(
             make_mara_state(scored_claims=[high_contested], config=cfg), config={}
         )
@@ -268,7 +270,7 @@ class TestContestedFlagging:
         from mara.config import ResearchConfig
         cfg = ResearchConfig(leaf_db_enabled=False)
         # Low confidence + large n → contested; human approves → contested=True preserved
-        claim = _SC("low n_large", 0.30, [], n_leaves=cfg.n_leaves_contested_threshold)
+        claim = _SC("low n_large", 0.30, [], n_leaves=cfg.n_leaves_contested_threshold, n_unique_urls=cfg.n_leaves_contested_threshold)
         result = hitl_checkpoint(make_mara_state(scored_claims=[claim], config=cfg), config={})
         approved = result["human_approved_claims"]
         assert len(approved) == 1
@@ -279,6 +281,6 @@ class TestContestedFlagging:
         from mara.config import ResearchConfig
         cfg = ResearchConfig(leaf_db_enabled=False)
         # High confidence + large n → NOT contested (confidence >= low_threshold)
-        claim = _SC("high conf large n", 0.90, [], n_leaves=cfg.n_leaves_contested_threshold)
+        claim = _SC("high conf large n", 0.90, [], n_leaves=cfg.n_leaves_contested_threshold, n_unique_urls=cfg.n_leaves_contested_threshold)
         result = hitl_checkpoint(make_mara_state(scored_claims=[claim], config=cfg), config={})
         assert result["human_approved_claims"][0].contested is False

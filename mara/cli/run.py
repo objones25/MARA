@@ -30,6 +30,7 @@ from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.types import Command
 
 from mara.agent.graph import build_graph
+from mara.agent.run_context import RunContext
 from mara.agent.state import CertifiedReport
 from mara.config import ResearchConfig
 from mara.logging import get_logger
@@ -148,6 +149,9 @@ async def _run(query: str, thread_id: str, output_dir: Path | None = None) -> No
         configurable["leaf_repo"] = leaf_repo
         configurable["run_id"] = run_id
         _log.info("Leaf DB enabled — run_id=%s, db=%s", run_id, config.leaf_db_path)
+
+    run_context = RunContext()
+    configurable["run_context"] = run_context
 
     run_config = {"configurable": configurable}
 
