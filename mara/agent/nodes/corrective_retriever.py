@@ -15,7 +15,7 @@ confidence_scorer) re-runs on the expanded leaf pool.  ``source_hasher`` is
 intentionally skipped: corrective leaves are inserted directly with hashes
 already computed here.
 
-Contested claims (low SA but n_leaves ≥ n_leaves_contested_threshold) are
+Contested claims (low SA but n_unique_urls ≥ n_leaves_contested_threshold) are
 NOT processed here — they route directly to ``hitl_checkpoint``.  This node
 only handles the *insufficient data* case.
 
@@ -101,7 +101,7 @@ async def corrective_retriever(state: MARAState, config: RunnableConfig) -> dict
     failing = [
         c for c in state["scored_claims"]
         if c.confidence < cfg.low_confidence_threshold
-        and c.n_leaves < cfg.n_leaves_contested_threshold
+        and c.n_unique_urls < cfg.n_leaves_contested_threshold
     ]
 
     if not failing:

@@ -52,7 +52,7 @@ class ResearchConfig(BaseSettings):
     low_confidence_threshold: float = Field(default=0.55, ge=0.0, le=1.0)
     similarity_support_threshold: float = Field(default=0.60, ge=0.0, le=1.0, description="Cosine similarity (exclusive) for a leaf to count as corroborating a claim. Calibrated for all-MiniLM-L6-v2 comparing distilled claims against raw/contextualized chunks; p75 of the similarity distribution is ~0.575 so 0.60 catches genuinely similar pairs without matching noise.")
     max_corrective_rag_loops: int = Field(default=2, ge=0)
-    n_leaves_contested_threshold: int = Field(default=15, gt=0, description="n_leaves >= this with low SA → contested (sources disagree), not insufficient data")
+    n_leaves_contested_threshold: int = Field(default=5, gt=0, description="n_unique_urls >= this with low SA → contested (sources disagree), not insufficient data")
     max_new_pages_per_round: int = Field(default=5, gt=0, description="Max new pages scraped per corrective round per sub-query")
     query_planner_max_tokens: int = Field(default=1024, gt=0, description="Max new tokens for the query planner LLM call.")
     claim_extractor_max_tokens: int = Field(default=16384, gt=0, description="Max new tokens for the claim extractor LLM call. 50 leaves can produce ~150 claims; 16384 gives comfortable headroom.")
