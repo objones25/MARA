@@ -251,6 +251,9 @@ async def retriever(state: MARAState, config: RunnableConfig) -> dict:
         return {"retrieved_leaves": []}
 
     if len(leaves) <= k:
+        # Per-URL cap intentionally skipped: if the corpus is already smaller
+        # than the extraction window there is nothing to cap against, and
+        # discarding any leaves would only reduce evidence.
         _log.info(
             "Leaf count (%d) ≤ max_claim_sources (%d) — skipping retrieval, using all",
             len(leaves),
