@@ -357,18 +357,20 @@ The confidence score for claim `c` is the **Beta-Binomial posterior mean** updat
 confidence(c) = SA(c) = (1 + k) / (2 + k)
 ```
 
-where `k` is the number of retrieved leaves whose cosine similarity to the claim exceeds `similarity_support_threshold` (default τ = 0.60).
+where `k` is the number of *unique source URLs* in the full `merkle_leaves` corpus with at least one chunk whose cosine similarity to the claim exceeds `similarity_support_threshold` (default τ = 0.60).
 
-Non-corroborating leaves — those that do not mention or contradict the claim — are excluded from the denominator entirely. Their silence is not evidence of contradiction; they are simply irrelevant to that claim. Only positive corroboration moves the score.
+Source deduplication enforces the independence assumption of the Beta-Binomial model. A single article split into 15 chunks would otherwise increment `k` by 15 — one source's opinion repeated, not independent corroboration. Counting unique URLs means a market research article chunked 20 times still casts exactly one vote.
+
+Non-corroborating sources — those with no chunk above the threshold — are excluded from the denominator entirely. Their silence is not evidence of contradiction; they are simply irrelevant to that claim. Only positive corroboration moves the score.
 
 This is the Laplace-smoothed estimator from a `Beta(1, 1)` prior (uniform / maximum uncertainty):
 
-- 0 corroborating leaves → SA = 0.5 (prior mean; maximum uncertainty)
-- 1 corroborating leaf   → SA = 0.67
-- 3 corroborating leaves → SA = 0.80 (clears `high_confidence_threshold`)
-- k → ∞                 → SA → 1.0 (never exactly reached)
+- 0 corroborating sources → SA = 0.5 (prior mean; maximum uncertainty)
+- 1 corroborating source  → SA = 0.67
+- 3 corroborating sources → SA = 0.80 (clears `high_confidence_threshold`)
+- k → ∞                  → SA → 1.0 (never exactly reached)
 
-The score is always in the open interval (0, 1). Similarities are computed between `SentenceTransformer("all-MiniLM-L6-v2")` embeddings of the claim and each retrieved leaf's `contextualized_text`.
+The score is always in the open interval (0, 1). Similarities are computed between `SentenceTransformer("all-MiniLM-L6-v2")` embeddings of the claim and every leaf's `contextualized_text` across the full `merkle_leaves` pool — not just the `retrieved_leaves` subset passed to the claim extractor. Scoring against the full corpus gives every claim the best possible evidence test; a leaf not selected for extraction may still be the strongest corroboration for a given claim.
 
 #### Routing based on confidence
 
@@ -377,8 +379,8 @@ After scoring, `route_after_scoring` distinguishes two low-confidence cases:
 | Condition | Interpretation | Route |
 |---|---|---|
 | confidence ≥ `high_confidence_threshold` | Well-supported | auto-approve at HITL |
-| confidence < `low_confidence_threshold` AND `n_leaves < n_leaves_contested_threshold` | **Insufficient data** — not enough sources | `corrective_retriever` (if loops remain) |
-| confidence < `low_confidence_threshold` AND `n_leaves ≥ n_leaves_contested_threshold` | **Contested** — sources exist but disagree | `hitl_checkpoint` (flagged `contested=True`) |
+| confidence < `low_confidence_threshold` AND `n_unique_urls < n_leaves_contested_threshold` | **Insufficient data** — not enough sources | `corrective_retriever` (if loops remain) |
+| confidence < `low_confidence_threshold` AND `n_unique_urls ≥ n_leaves_contested_threshold` | **Contested** — sources exist but disagree | `hitl_checkpoint` (flagged `contested=True`) |
 
 ```
 confidence ≥ 0.80                          →  auto-approved at HITL
@@ -393,7 +395,7 @@ loop cap reached                           →  hitl_checkpoint
 
 **Role:** When claims have low confidence due to _insufficient data_ (few corroborating leaves, not genuine source disagreement), this node acquires targeted new evidence and re-runs the full scoring pipeline on the expanded leaf pool.
 
-**Step 1 — Identify failing claims:** Claims where `confidence < low_confidence_threshold` AND `n_leaves < n_leaves_contested_threshold`. Contested claims (large `n_leaves`, low confidence) are routed directly to HITL — they have enough data, the sources just disagree.
+**Step 1 — Identify failing claims:** Claims where `confidence < low_confidence_threshold` AND `n_unique_urls < n_leaves_contested_threshold`. Contested claims (large `n_unique_urls`, low confidence) are routed directly to HITL — they have enough data, the sources just disagree.
 
 **Step 2 — Generate corrective sub-queries:** The LLM generates 1–2 targeted search queries per failing claim, focused on finding specific supporting or contradicting evidence.
 
@@ -411,7 +413,7 @@ The loop repeats up to `max_corrective_rag_loops` times (default: 2). After the 
 
 **Role:** When claims have been through all corrective rounds (or were contested from the start), the graph pauses using LangGraph's `interrupt()` mechanism and surfaces them for human review.
 
-**Contested flagging:** Before presenting claims for review, any claim with `confidence < low_confidence_threshold` AND `n_leaves ≥ n_leaves_contested_threshold` is flagged `contested=True`. This signals to the reviewer that sources were found but disagree — not that evidence was simply absent.
+**Contested flagging:** Before presenting claims for review, any claim with `confidence < low_confidence_threshold` AND `n_unique_urls ≥ n_leaves_contested_threshold` is flagged `contested=True`. This signals to the reviewer that sources were found but disagree — not that evidence was simply absent.
 
 **Confidence stats:** At entry, the node logs mean, median, std dev, min, and max confidence across all scored claims, giving an at-a-glance picture of the overall evidence quality before the review begins.
 
@@ -432,6 +434,7 @@ def hitl_checkpoint(state: MARAState) -> dict:
     decision = interrupt({
         "needs_review": [{"index": i, "text": c.text, "confidence": c.confidence,
                            "corroborating": c.corroborating, "n_leaves": c.n_leaves,
+                           "n_unique_urls": c.n_unique_urls,
                            "source_indices": c.source_indices, "contested": c.contested}
                          for i, c in enumerate(needs_review)],
         "auto_approved_count": len(auto_approved),
@@ -866,7 +869,7 @@ MARA_HIGH_CONFIDENCE_THRESHOLD=0.80
 | `max_claim_sources`            | `50`                               | Leaves passed to claim extraction after retrieval (≤ candidates)                                     |
 | `max_extracted_claims`         | `100`                              | Maximum claims the LLM extracts per run (injected into the prompt)                                   |
 | `max_corrective_rag_loops`     | `2`                                | Max corrective RAG retries before routing to HITL                                                    |
-| `n_leaves_contested_threshold` | `15`                               | `n_leaves ≥` this with low SA → contested (sources disagree), not insufficient data                  |
+| `n_leaves_contested_threshold` | `5`                                | `n_unique_urls ≥` this with low SA → contested (sources disagree), not insufficient data             |
 | `max_new_pages_per_round`      | `5`                                | Max new pages scraped per corrective sub-query per round                                             |
 | `high_confidence_threshold`    | `0.80`                             | SA score above which claims are auto-approved                                                        |
 | `low_confidence_threshold`     | `0.55`                             | SA score below which claims trigger corrective retrieval or HITL                                     |
@@ -892,6 +895,7 @@ mara/
 ├── agent/
 │   ├── graph.py              # StateGraph definition and compilation (12 nodes)
 │   ├── state.py              # MARAState TypedDict and all shared data classes
+│   ├── run_context.py        # RunContext dataclass — carries leaf embeddings between retriever and scorer
 │   ├── nodes/
 │   │   ├── query_planner.py      # Sub-query decomposition node
 │   │   ├── search_worker/        # Retrieval subgraphs (per sub-query, dispatched via Send)
@@ -962,6 +966,7 @@ tests/
 │   │   ├── test_retriever.py         # Hybrid RRF + embedding cache; pure-semantic fallback
 │   │   ├── test_claim_extractor.py   # Claim extraction with mocked LLM
 │   │   ├── test_confidence_scorer.py # Node wiring: state in → scored claims out
+│   │   ├── test_corrective_retriever.py # DB-first + scrape paths; loop_count increments; URL dedup
 │   │   ├── test_hitl_checkpoint.py   # interrupt() dispatch; approve/auto-approve paths
 │   │   ├── test_report_synthesizer.py # Claim-to-prose with mocked LLM
 │   │   ├── test_certified_output.py  # CertifiedReport assembly; complete_run DB call

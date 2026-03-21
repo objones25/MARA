@@ -167,7 +167,7 @@ class TestRouteAfterScoring:
         assert route_after_scoring(state) == "hitl_checkpoint"
 
     def test_contested_claims_only_returns_hitl(self, make_mara_state):
-        # n_unique_urls >= n_leaves_contested_threshold (default=15) → contested, not failing
+        # n_unique_urls >= n_leaves_contested_threshold (default=5) → contested, not failing
         cfg = ResearchConfig(leaf_db_enabled=False)
         claims = [_SC("c", 0.10, [], n_leaves=cfg.n_leaves_contested_threshold, n_unique_urls=cfg.n_leaves_contested_threshold)]
         state = make_mara_state(scored_claims=claims, config=cfg, loop_count=0)

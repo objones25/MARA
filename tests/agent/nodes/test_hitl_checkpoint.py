@@ -229,7 +229,7 @@ class TestContestedFlagging:
         )
         from mara.config import ResearchConfig
         cfg = ResearchConfig(leaf_db_enabled=False)
-        # n_unique_urls >= n_leaves_contested_threshold (default=15) and confidence below low threshold
+        # n_unique_urls >= n_leaves_contested_threshold (default=5) and confidence below low threshold
         claim = _SC("contested claim", 0.30, [], n_leaves=cfg.n_leaves_contested_threshold, n_unique_urls=cfg.n_leaves_contested_threshold)
         result = hitl_checkpoint(make_mara_state(scored_claims=[claim], config=cfg), config={})
         # The claim ends up in needs_review (below high threshold) — check payload
