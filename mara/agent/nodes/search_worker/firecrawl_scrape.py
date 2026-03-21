@@ -116,7 +116,15 @@ async def firecrawl_scrape(state: SearchWorkerState, config: RunnableConfig) -> 
     _log.debug("Scraping %d URL(s) via Firecrawl (%d served from cache)", len(urls_to_scrape), len(urls) - len(urls_to_scrape))
 
     fc = Firecrawl(api_key=research_config.firecrawl_api_key)
-    job = await asyncio.to_thread(fc.batch_scrape, urls_to_scrape, formats=["markdown"])
+    try:
+        job = await asyncio.to_thread(fc.batch_scrape, urls_to_scrape, formats=["markdown"])
+    except Exception as exc:
+        _log.warning(
+            "Firecrawl batch_scrape failed for %d URL(s): %s — returning cached chunks only",
+            len(urls_to_scrape),
+            exc,
+        )
+        return {"raw_chunks": raw_chunks}
 
     for doc in job.data or []:
         markdown: str = doc.markdown or ""

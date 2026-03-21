@@ -447,3 +447,75 @@ class TestFirecrawlScrapeCacheIntegration:
         result = await firecrawl_scrape(state, {})
         mock_fc.batch_scrape.assert_called_once()
         assert result["raw_chunks"]
+
+
+# ---------------------------------------------------------------------------
+# Firecrawl API error handling
+# ---------------------------------------------------------------------------
+
+
+class TestFirecrawlErrorHandling:
+    """batch_scrape can fail with various API errors (400, 401, 429, 500, etc.).
+    The node must never crash the pipeline — it logs a warning and returns
+    whatever was already cached.
+    """
+
+    def _mock_firecrawl_raising(self, mocker, exc: Exception):
+        """Patch Firecrawl so batch_scrape raises *exc*."""
+        mock_fc = mocker.MagicMock()
+        mock_fc.batch_scrape.side_effect = exc
+        mocker.patch(
+            "mara.agent.nodes.search_worker.firecrawl_scrape.Firecrawl",
+            return_value=mock_fc,
+        )
+        return mock_fc
+
+    async def test_batch_scrape_exception_returns_raw_chunks_key(self, mocker, make_search_worker_state):
+        """Any exception from batch_scrape must still produce a raw_chunks key."""
+        self._mock_firecrawl_raising(mocker, Exception("No valid URLs provided"))
+        state = make_search_worker_state(search_results=[_make_search_result("https://a.com")])
+        result = await firecrawl_scrape(state, {})
+        assert "raw_chunks" in result
+
+    async def test_batch_scrape_exception_returns_empty_chunks_when_no_cache(self, mocker, make_search_worker_state):
+        """With no cache, a failed scrape returns an empty list (not a crash)."""
+        self._mock_firecrawl_raising(mocker, Exception("Bad Request"))
+        state = make_search_worker_state(search_results=[_make_search_result("https://a.com")])
+        result = await firecrawl_scrape(state, {})
+        assert result["raw_chunks"] == []
+
+    async def test_batch_scrape_exception_preserves_cached_chunks(self, mocker, make_search_worker_state):
+        """Cache hits already collected before the API call are returned intact."""
+        self._mock_firecrawl_raising(mocker, Exception("Unauthorized"))
+        repo = mocker.MagicMock()
+        cached_leaf = {
+            "url": "https://cached.com", "text": "cached content",
+            "retrieved_at": "2026-03-20T10:00:00Z",
+        }
+        repo.get_fresh_leaves_for_url.side_effect = (
+            lambda url, max_age: [cached_leaf] if url == "https://cached.com" else []
+        )
+        config = {"configurable": {"leaf_repo": repo}}
+        state = make_search_worker_state(search_results=[
+            _make_search_result("https://cached.com"),
+            _make_search_result("https://uncached.com"),
+        ])
+        result = await firecrawl_scrape(state, config)
+        texts = {c["text"] for c in result["raw_chunks"]}
+        assert "cached content" in texts
+
+    async def test_batch_scrape_exception_does_not_include_uncached_chunks(self, mocker, make_search_worker_state):
+        """Chunks from the failed scrape are not partially included."""
+        self._mock_firecrawl_raising(mocker, Exception("Server Error"))
+        state = make_search_worker_state(search_results=[_make_search_result("https://a.com")])
+        result = await firecrawl_scrape(state, {})
+        # No partial data from a failed scrape
+        assert len(result["raw_chunks"]) == 0
+
+    async def test_different_exception_types_all_handled(self, mocker, make_search_worker_state):
+        """ValueError, RuntimeError, and custom errors are all caught."""
+        for exc_type in (ValueError, RuntimeError, ConnectionError):
+            self._mock_firecrawl_raising(mocker, exc_type("simulated failure"))
+            state = make_search_worker_state(search_results=[_make_search_result("https://x.com")])
+            result = await firecrawl_scrape(state, {})
+            assert "raw_chunks" in result, f"Failed for {exc_type}"
