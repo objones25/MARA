@@ -867,6 +867,7 @@ MARA_HIGH_CONFIDENCE_THRESHOLD=0.80
 | `brave_freshness`              | `""`                               | Optional freshness filter: `pd` (24h), `pw` (7d), `pm` (31d), `py` (1y), or `YYYY-MM-DDtoYYYY-MM-DD` |
 | `max_retrieval_candidates`     | `150`                              | Retrieval pool size; reserve for future reranking stage                                              |
 | `max_claim_sources`            | `50`                               | Leaves passed to claim extraction after retrieval (≤ candidates)                                     |
+| `max_chunks_per_url`           | `3`                                | Maximum chunks from any single source URL admitted to the extraction window. Prevents high-volume commercial sources from crowding out lower-volume sources such as ArXiv papers. |
 | `max_extracted_claims`         | `100`                              | Maximum claims the LLM extracts per run (injected into the prompt)                                   |
 | `max_corrective_rag_loops`     | `2`                                | Max corrective RAG retries before routing to HITL                                                    |
 | `n_leaves_contested_threshold` | `5`                                | `n_unique_urls ≥` this with low SA → contested (sources disagree), not insufficient data             |
