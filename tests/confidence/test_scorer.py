@@ -165,6 +165,62 @@ class TestScoreClaimWithLeaves:
 
 
 # ---------------------------------------------------------------------------
+# score_claim — source-deduplicated k (leaf_urls provided)
+# ---------------------------------------------------------------------------
+
+
+class TestScoreClaimSourceDedup:
+    def test_multiple_chunks_same_url_counted_once(self):
+        """3 identical chunks from the same URL → corroborating ≤ 1 (one source vote)."""
+        config = ResearchConfig(similarity_support_threshold=0.5, leaf_db_enabled=False)
+        claim = "The sky is blue due to Rayleigh scattering."
+        leaves = [claim] * 3  # identical to claim → high similarity
+        urls = ["https://example.com/article"] * 3
+        result = score_claim(claim, leaves, [], config, leaf_urls=urls)
+        assert result.corroborating <= 1
+
+    def test_unique_urls_each_counted(self):
+        """Same text, 3 distinct URLs → corroborating equals chunk-level k (all unique)."""
+        config = ResearchConfig(similarity_support_threshold=0.5, leaf_db_enabled=False)
+        claim = "The sky is blue due to Rayleigh scattering."
+        text = claim  # identical → high similarity
+        leaves = [text, text, text]
+        urls = ["https://a.com", "https://b.com", "https://c.com"]
+        result_dedup = score_claim(claim, leaves, [], config, leaf_urls=urls)
+        result_no_dedup = score_claim(claim, leaves, [], config)
+        # All URLs unique → dedup k == chunk k
+        assert result_dedup.corroborating == result_no_dedup.corroborating
+
+    def test_source_dedup_reduces_corroborating_vs_chunk_count(self):
+        """4 chunks from 2 URLs: dedup k ≤ chunk k."""
+        config = ResearchConfig(similarity_support_threshold=0.5, leaf_db_enabled=False)
+        claim = "The sky is blue due to Rayleigh scattering."
+        high_sim_text = claim
+        leaves = [high_sim_text] * 4
+        urls = ["https://a.com", "https://a.com", "https://b.com", "https://b.com"]
+        result_dedup = score_claim(claim, leaves, [], config, leaf_urls=urls)
+        result_chunks = score_claim(claim, leaves, [], config)
+        assert result_dedup.corroborating <= result_chunks.corroborating
+
+    def test_n_leaves_is_chunk_count_not_url_count(self):
+        """n_leaves always reflects total chunk count, regardless of dedup."""
+        config = ResearchConfig(leaf_db_enabled=False)
+        leaves = ["Some text."] * 6
+        urls = ["https://a.com"] * 6
+        result = score_claim("A claim.", leaves, [], config, leaf_urls=urls)
+        assert result.n_leaves == 6
+
+    def test_leaf_urls_none_preserves_chunk_level_behavior(self):
+        """leaf_urls=None → identical result to not passing it."""
+        config = ResearchConfig(leaf_db_enabled=False)
+        leaves = ["Supporting text about the claim."]
+        result_default = score_claim("A claim.", leaves, [], config)
+        result_none = score_claim("A claim.", leaves, [], config, leaf_urls=None)
+        assert result_default.confidence == pytest.approx(result_none.confidence)
+        assert result_default.corroborating == result_none.corroborating
+
+
+# ---------------------------------------------------------------------------
 # ScoredClaim dataclass
 # ---------------------------------------------------------------------------
 

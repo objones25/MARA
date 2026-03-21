@@ -2,15 +2,19 @@
 
 For each Claim in MARAState.extracted_claims this node calls score_claim()
 with ALL retrieved leaves as the candidate pool. The confidence score is the
-Beta-Binomial posterior mean: (1 + k) / (2 + n), where k is the number of
-leaves that semantically corroborate the claim and n is the total leaf count.
+Beta-Binomial posterior mean: (1 + k) / (2 + k), where k is the number of
+*unique source URLs* whose best-matching chunk exceeds the similarity threshold.
 
 Why all leaves instead of just the cited sources?
-  Each claim is extracted from one leaf and cites that leaf. Scoring against
-  only the cited source gives n=1 in the Beta-Binomial — essentially useless.
-  Scoring against all 50 retrieved leaves gives a meaningful signal: a claim
-  corroborated by 30/50 leaves is genuinely well-supported; one corroborated
-  by 1/50 is not.
+  Each claim is attributed to one leaf by the extractor. Scoring against only
+  that single leaf gives k ∈ {0, 1} — essentially useless. Scoring against all
+  retrieved leaves gives a real signal.
+
+Why source-deduplicated k?
+  A single article chunked into 15 pieces can push k to 15, but that is one
+  source's opinion repeated — not independent corroboration. Deduplication
+  enforces the independence assumption of the Beta-Binomial model: k counts
+  unique URLs, not chunks.
 
 Why asyncio.to_thread?
   score_claim() calls embed(), which runs SentenceTransformer inference — a
@@ -50,6 +54,7 @@ async def confidence_scorer(state: MARAState, config: RunnableConfig) -> dict:
     _log.info("Scoring %d claims against %d leaves", len(claims), len(leaves))
 
     all_leaf_texts = [leaf["contextualized_text"] for leaf in leaves]
+    all_leaf_urls = [leaf["url"] for leaf in leaves]
 
     scored = []
     for claim in claims:
@@ -59,6 +64,7 @@ async def confidence_scorer(state: MARAState, config: RunnableConfig) -> dict:
             all_leaf_texts,
             claim["source_indices"],
             research_config,
+            all_leaf_urls,
         )
         scored.append(result)
 

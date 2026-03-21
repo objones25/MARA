@@ -1,13 +1,15 @@
 """Confidence scorer: scores a claim via Beta-Binomial Source Agreement.
 
 score_claim embeds the claim against ALL retrieved leaves and applies the
-Beta-Binomial posterior mean as the confidence score.
+Beta-Binomial posterior mean (1 + k) / (2 + k) as the confidence score,
+where k is the number of *unique source URLs* that corroborate the claim.
 
-Why all leaves, not just the cited sources?
-  Each claim is attributed to one leaf by the extractor (n=1 in the
-  Beta-Binomial — informationally useless). Scoring against all retrieved
-  leaves gives a real signal: a claim corroborated by 30/50 leaves is
-  genuinely well-supported; one corroborated by 1/50 is not.
+Why source-deduplicated k?
+  A single article split into 20 chunks inflates the naive chunk count by 20×,
+  violating the independence assumption of the Beta-Binomial model. Counting
+  the number of distinct URLs that have at least one chunk above the similarity
+  threshold restores the intended semantics: k = number of independent sources
+  that agree with the claim.
 
 No LangGraph imports. Pure and testable without a live LLM or graph.
 """
@@ -60,17 +62,25 @@ def score_claim(
     all_leaf_texts: list[str],
     source_indices: list[int],
     config: ResearchConfig,
+    leaf_urls: list[str] | None = None,
 ) -> ScoredClaim:
     """Score a single claim against all retrieved leaves.
 
     Embeds the claim and all leaf texts, computes cosine similarities, then
     applies the Beta-Binomial posterior mean as the confidence score.
 
+    When ``leaf_urls`` is provided, k counts unique source URLs (one vote per
+    URL, using the maximum similarity across all chunks from that URL).  This
+    enforces the independence assumption of the Beta-Binomial model.  When
+    ``leaf_urls`` is None, k counts individual chunks (legacy behaviour).
+
     Args:
         claim_text:     The claim to score.
         all_leaf_texts: ALL retrieved leaf texts (not just cited sources).
         source_indices: Leaf indices the claim extractor attributed the claim to.
         config:         ResearchConfig driving embedding model and threshold.
+        leaf_urls:      URL for each leaf in ``all_leaf_texts`` (same order).
+                        When provided, enables source-level deduplication of k.
 
     Returns:
         A ScoredClaim with confidence in the open interval (0, 1).
@@ -93,8 +103,19 @@ def score_claim(
 
     similarities = [cosine_similarity(claim_embedding, le) for le in leaf_embeddings]
     n = len(similarities)
-    k = sum(1 for s in similarities if s > threshold)
-    confidence = compute_sa(similarities, threshold)
+
+    if leaf_urls is not None:
+        # Source-deduplicated k: one vote per unique URL (max chunk similarity).
+        url_max_sim: dict[str, float] = {}
+        for url, sim in zip(leaf_urls, similarities):
+            if url not in url_max_sim or sim > url_max_sim[url]:
+                url_max_sim[url] = sim
+        per_source_sims = list(url_max_sim.values())
+        k = sum(1 for s in per_source_sims if s > threshold)
+        confidence = compute_sa(per_source_sims, threshold)
+    else:
+        k = sum(1 for s in similarities if s > threshold)
+        confidence = compute_sa(similarities, threshold)
 
     return ScoredClaim(
         text=claim_text,
