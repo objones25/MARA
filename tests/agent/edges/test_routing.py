@@ -27,6 +27,7 @@ class _SC:
     text: str
     confidence: float
     source_indices: list
+    corroborating: int = 0
     n_leaves: int = 0
     n_unique_urls: int = 0
 
@@ -167,31 +168,31 @@ class TestRouteAfterScoring:
         assert route_after_scoring(state) == "hitl_checkpoint"
 
     def test_contested_claims_only_returns_hitl(self, make_mara_state):
-        # n_unique_urls >= n_leaves_contested_threshold (default=5) → contested, not failing
+        # corroborating >= n_leaves_contested_threshold (default=2) → contested, not failing
         cfg = ResearchConfig(leaf_db_enabled=False)
-        claims = [_SC("c", 0.10, [], n_leaves=cfg.n_leaves_contested_threshold, n_unique_urls=cfg.n_leaves_contested_threshold)]
+        claims = [_SC("c", 0.10, [], corroborating=cfg.n_leaves_contested_threshold)]
         state = make_mara_state(scored_claims=claims, config=cfg, loop_count=0)
         assert route_after_scoring(state) == "hitl_checkpoint"
 
     def test_mixed_failing_and_contested_returns_corrective(self, make_mara_state):
-        # One contested (large n_unique_urls) + one failing (small n_unique_urls) → still has failing → corrective
+        # One contested (large corroborating) + one failing (small corroborating) → still has failing → corrective
         cfg = ResearchConfig(leaf_db_enabled=False)
         claims = [
-            _SC("contested", 0.10, [], n_leaves=cfg.n_leaves_contested_threshold, n_unique_urls=cfg.n_leaves_contested_threshold),
-            _SC("failing", 0.10, [], n_leaves=5, n_unique_urls=0),
+            _SC("contested", 0.10, [], corroborating=cfg.n_leaves_contested_threshold),
+            _SC("failing", 0.10, [], corroborating=0),
         ]
         state = make_mara_state(scored_claims=claims, config=cfg, loop_count=0)
         assert route_after_scoring(state) == "corrective_retriever"
 
     def test_mixed_high_and_failing_returns_corrective(self, make_mara_state):
         # One high-confidence + one failing → corrective fires
-        claims = [_SC("high", 0.95, [], n_leaves=20), _SC("low", 0.20, [], n_leaves=5)]
+        claims = [_SC("high", 0.95, []), _SC("low", 0.20, [], corroborating=0)]
         state = make_mara_state(scored_claims=claims, loop_count=0)
         assert route_after_scoring(state) == "corrective_retriever"
 
     def test_custom_loop_budget_respected(self, make_mara_state):
         cfg = ResearchConfig(max_corrective_rag_loops=3, leaf_db_enabled=False)
-        claims = [_SC("c", 0.10, [], n_leaves=5)]
+        claims = [_SC("c", 0.10, [], corroborating=0)]
         # loop_count=2 < max=3 → corrective
         state = make_mara_state(scored_claims=claims, config=cfg, loop_count=2)
         assert route_after_scoring(state) == "corrective_retriever"
@@ -201,12 +202,12 @@ class TestRouteAfterScoring:
 
     def test_custom_n_leaves_contested_threshold(self, make_mara_state):
         cfg = ResearchConfig(n_leaves_contested_threshold=5, leaf_db_enabled=False)
-        # n_unique_urls=5 >= threshold=5 → contested, no failing
-        claims = [_SC("c", 0.10, [], n_leaves=5, n_unique_urls=5)]
+        # corroborating=5 >= threshold=5 → contested, no failing
+        claims = [_SC("c", 0.10, [], corroborating=5)]
         state = make_mara_state(scored_claims=claims, config=cfg, loop_count=0)
         assert route_after_scoring(state) == "hitl_checkpoint"
-        # n_unique_urls=4 < threshold=5 → failing
-        claims = [_SC("c", 0.10, [], n_leaves=4, n_unique_urls=4)]
+        # corroborating=4 < threshold=5 → failing
+        claims = [_SC("c", 0.10, [], corroborating=4)]
         state = make_mara_state(scored_claims=claims, config=cfg, loop_count=0)
         assert route_after_scoring(state) == "corrective_retriever"
 

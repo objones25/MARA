@@ -61,7 +61,7 @@ def hitl_checkpoint(state: MARAState, config: RunnableConfig) -> dict:
     for claim in state["scored_claims"]:
         if (
             claim.confidence < cfg.low_confidence_threshold
-            and claim.n_unique_urls >= cfg.n_leaves_contested_threshold
+            and claim.corroborating >= cfg.n_leaves_contested_threshold
         ):
             claim = replace(claim, contested=True)
         scored.append(claim)

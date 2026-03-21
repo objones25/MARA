@@ -51,11 +51,19 @@ def dispatch_search_workers(state: MARAState) -> list[Send]:
 def route_after_scoring(state: MARAState) -> str:
     """Route after confidence scoring.
 
-    Claims with low SA and insufficient evidence (n_unique_urls < n_leaves_contested_threshold)
-    are routed to corrective_retriever to acquire more data, as long as the loop
-    cap has not been reached.
+    Claims with low SA and insufficient corroboration
+    (corroborating < n_leaves_contested_threshold) are routed to
+    corrective_retriever to acquire more data, as long as the loop cap has
+    not been reached.
 
-    Contested claims (low SA but large n — sources exist but disagree) and
+    Since scoring now runs against the full merkle_leaves corpus, n_unique_urls
+    is always the total corpus size and cannot distinguish "few sources checked"
+    from "many sources checked but none corroborate".  corroborating (k) is the
+    correct signal: k=0 with 69 sources means no evidence was found, not that
+    evidence is genuinely contested.
+
+    Contested claims (low SA but k >= n_leaves_contested_threshold — enough
+    independent sources were checked yet still failed to corroborate) and
     approved claims are sent directly to hitl_checkpoint.
 
     Args:
@@ -69,7 +77,7 @@ def route_after_scoring(state: MARAState) -> str:
     failing = [
         c for c in state["scored_claims"]
         if c.confidence < cfg.low_confidence_threshold
-        and c.n_unique_urls < cfg.n_leaves_contested_threshold
+        and c.corroborating < cfg.n_leaves_contested_threshold
     ]
     if failing and state["loop_count"] < cfg.max_corrective_rag_loops:
         _log.info(

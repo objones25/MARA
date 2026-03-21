@@ -101,7 +101,7 @@ async def corrective_retriever(state: MARAState, config: RunnableConfig) -> dict
     failing = [
         c for c in state["scored_claims"]
         if c.confidence < cfg.low_confidence_threshold
-        and c.n_unique_urls < cfg.n_leaves_contested_threshold
+        and c.corroborating < cfg.n_leaves_contested_threshold
     ]
 
     if not failing:

@@ -32,13 +32,13 @@ from mara.merkle.hasher import hash_chunk
 # ---------------------------------------------------------------------------
 
 
-def _scored_claim(text: str, confidence: float = 0.30, n_leaves: int = 5, n_unique_urls: int = 0) -> ScoredClaim:
+def _scored_claim(text: str, confidence: float = 0.30, n_leaves: int = 5, n_unique_urls: int = 0, corroborating: int = 1) -> ScoredClaim:
     """Build a ScoredClaim with sensible defaults for tests."""
     return ScoredClaim(
         text=text,
         source_indices=[0],
         confidence=confidence,
-        corroborating=1,
+        corroborating=corroborating,
         n_leaves=n_leaves,
         n_unique_urls=n_unique_urls,
     )
@@ -191,9 +191,9 @@ class TestNoFailingClaims:
         assert "merkle_leaves" not in result
 
     async def test_contested_claims_not_treated_as_failing(self, mocker, make_mara_state):
-        # n_unique_urls >= n_leaves_contested_threshold → not a failing claim
+        # corroborating >= n_leaves_contested_threshold → not a failing claim
         cfg = ResearchConfig(leaf_db_enabled=False)
-        claims = [_scored_claim("contested", confidence=0.30, n_leaves=cfg.n_leaves_contested_threshold, n_unique_urls=cfg.n_leaves_contested_threshold)]
+        claims = [_scored_claim("contested", confidence=0.30, n_leaves=cfg.n_leaves_contested_threshold, n_unique_urls=cfg.n_leaves_contested_threshold, corroborating=cfg.n_leaves_contested_threshold)]
         state = make_mara_state(scored_claims=claims, config=cfg, loop_count=0)
         result = await corrective_retriever(state, config={})
         assert result["loop_count"] == 1
