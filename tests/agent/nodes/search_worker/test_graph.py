@@ -14,7 +14,12 @@ test_brave_search.py and test_firecrawl_scrape.py.  This file focuses on:
 
 import pytest
 
-from mara.agent.nodes.search_worker.graph import search_worker, _build_search_worker
+from mara.agent.nodes.search_worker.graph import (
+    search_worker,
+    _build_search_worker,
+    semantic_scholar_worker,
+    _build_semantic_scholar_worker,
+)
 from mara.agent.state import SearchWorkerState, SubQuery, SourceChunk
 from mara.config import ResearchConfig
 
@@ -244,3 +249,78 @@ class TestSearchWorkerEndToEnd:
         graph = _build_search_worker()
         result = await graph.ainvoke(_make_initial_state())
         assert result["raw_chunks"] == []
+
+
+# ---------------------------------------------------------------------------
+# Semantic Scholar worker topology
+# ---------------------------------------------------------------------------
+
+
+class TestSemanticScholarWorkerTopology:
+    def test_compiled_graph_is_not_none(self):
+        assert semantic_scholar_worker is not None
+
+    def test_graph_has_semantic_scholar_search_node(self):
+        assert "semantic_scholar_search" in semantic_scholar_worker.nodes
+
+    def test_graph_does_not_have_firecrawl_node(self):
+        assert "firecrawl_scrape" not in semantic_scholar_worker.nodes
+
+    def test_build_returns_new_compiled_graph(self):
+        graph = _build_semantic_scholar_worker()
+        assert graph is not None
+        assert "semantic_scholar_search" in graph.nodes
+
+
+class TestSemanticScholarWorkerEndToEnd:
+    async def test_graph_invokes_semantic_scholar_search(self, mocker):
+        called = []
+
+        async def fake_s2(state, config):
+            called.append("semantic_scholar_search")
+            return {"raw_chunks": []}
+
+        mocker.patch(
+            "mara.agent.nodes.search_worker.graph.semantic_scholar_search", fake_s2
+        )
+        graph = _build_semantic_scholar_worker()
+        await graph.ainvoke(_make_initial_state())
+        assert "semantic_scholar_search" in called
+
+    async def test_output_contains_raw_chunks_key(self, mocker):
+        async def fake_s2(state, config):
+            return {"raw_chunks": []}
+
+        mocker.patch(
+            "mara.agent.nodes.search_worker.graph.semantic_scholar_search", fake_s2
+        )
+        graph = _build_semantic_scholar_worker()
+        result = await graph.ainvoke(_make_initial_state())
+        assert "raw_chunks" in result
+
+    async def test_chunks_from_node_present_in_output(self, mocker):
+        expected = _make_source_chunk("https://www.semanticscholar.org/paper/CorpusId:1", "text", "q")
+
+        async def fake_s2(state, config):
+            return {"raw_chunks": [expected]}
+
+        mocker.patch(
+            "mara.agent.nodes.search_worker.graph.semantic_scholar_search", fake_s2
+        )
+        graph = _build_semantic_scholar_worker()
+        result = await graph.ainvoke(_make_initial_state())
+        assert expected in result["raw_chunks"]
+
+    async def test_sub_query_preserved_through_graph(self, mocker):
+        received: dict = {}
+
+        async def fake_s2(state, config):
+            received["query"] = state["sub_query"]["query"]
+            return {"raw_chunks": []}
+
+        mocker.patch(
+            "mara.agent.nodes.search_worker.graph.semantic_scholar_search", fake_s2
+        )
+        graph = _build_semantic_scholar_worker()
+        await graph.ainvoke(_make_initial_state(query="quantum computing"))
+        assert received["query"] == "quantum computing"

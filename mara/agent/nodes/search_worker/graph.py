@@ -1,18 +1,21 @@
 """Compiled search worker subgraphs.
 
-Two subgraphs are exported, each dispatched in parallel per sub-query:
+Three subgraphs are exported, each dispatched in parallel per sub-query:
 
-    search_worker:  brave_search  →  firecrawl_scrape
-    arxiv_worker:   arxiv_search  →  firecrawl_scrape
+    search_worker:            brave_search  →  firecrawl_scrape
+    arxiv_worker:             arxiv_search  →  firecrawl_scrape
+    semantic_scholar_worker:  semantic_scholar_search  (no scraping — snippets are the text)
 
-Both subgraphs use the same SearchWorkerState and the same firecrawl_scrape
-node implementation.  search_worker retrieves web pages via Brave Search;
-arxiv_worker retrieves full academic papers via the ArXiv API, passing
-versioned PDF URLs to firecrawl_scrape for full-text extraction.
+search_worker and arxiv_worker retrieve URLs and pass them to firecrawl_scrape
+for full-text extraction.  semantic_scholar_worker calls the Semantic Scholar
+/snippet/search endpoint and returns SourceChunks directly, avoiding Firecrawl
+entirely.
 
 Usage (from the parent graph's fan-out edge):
 
-    from mara.agent.nodes.search_worker.graph import arxiv_worker, search_worker
+    from mara.agent.nodes.search_worker.graph import (
+        arxiv_worker, search_worker, semantic_scholar_worker
+    )
 
     def dispatch_workers(state: MARAState):
         sends = []
@@ -25,12 +28,15 @@ Usage (from the parent graph's fan-out edge):
             }
             sends.append(Send("search_worker", payload))
             sends.append(Send("arxiv_worker", payload))
+            sends.append(Send("semantic_scholar_worker", payload))
         return sends
 
     graph.add_node("search_worker", search_worker)
     graph.add_node("arxiv_worker", arxiv_worker)
+    graph.add_node("semantic_scholar_worker", semantic_scholar_worker)
     graph.add_conditional_edges(
-        "query_planner", dispatch_workers, ["search_worker", "arxiv_worker"]
+        "query_planner", dispatch_workers,
+        ["search_worker", "arxiv_worker", "semantic_scholar_worker"]
     )
 """
 
@@ -40,6 +46,7 @@ from mara.agent.state import SearchWorkerState
 from .arxiv_search import arxiv_search
 from .brave_search import brave_search
 from .firecrawl_scrape import firecrawl_scrape
+from .semantic_scholar_search import semantic_scholar_search
 
 
 def _build_search_worker():
@@ -62,5 +69,14 @@ def _build_arxiv_worker():
     return builder.compile()
 
 
+def _build_semantic_scholar_worker():
+    builder: StateGraph = StateGraph(SearchWorkerState)
+    builder.add_node("semantic_scholar_search", semantic_scholar_search)
+    builder.add_edge(START, "semantic_scholar_search")
+    builder.add_edge("semantic_scholar_search", END)
+    return builder.compile()
+
+
 search_worker = _build_search_worker()
 arxiv_worker = _build_arxiv_worker()
+semantic_scholar_worker = _build_semantic_scholar_worker()

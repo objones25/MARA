@@ -78,6 +78,10 @@ class ResearchConfig(BaseSettings):
     # ArXiv
     arxiv_max_results: int = Field(default=5, gt=0, description="ArXiv papers requested per sub-query.")
 
+    # Semantic Scholar
+    semantic_scholar_api_key: str = Field(default="", alias="S2_API_KEY", description="Semantic Scholar API key (x-api-key header). Optional but recommended to avoid shared rate limits under concurrent load.")
+    semantic_scholar_max_results: int = Field(default=5, gt=0, description="Semantic Scholar snippets requested per sub-query.")
+
     @model_validator(mode="after")
     def claim_sources_le_candidates(self) -> "ResearchConfig":
         if self.max_claim_sources > self.max_retrieval_candidates:

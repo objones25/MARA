@@ -39,9 +39,11 @@ def dispatch_search_workers(state: MARAState) -> list[Send]:
         }
         sends.append(Send("search_worker", payload))
         sends.append(Send("arxiv_worker", payload))
+        sends.append(Send("semantic_scholar_worker", payload))
     _log.info(
-        "Dispatching %d worker(s): %d web + %d arxiv",
+        "Dispatching %d worker(s): %d web + %d arxiv + %d semantic_scholar",
         len(sends),
+        len(sub_queries),
         len(sub_queries),
         len(sub_queries),
     )

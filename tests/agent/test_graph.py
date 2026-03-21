@@ -13,6 +13,7 @@ EXPECTED_NODES = {
     "query_planner",
     "search_worker",
     "arxiv_worker",
+    "semantic_scholar_worker",
     "source_hasher",
     "merkle_builder",
     "retriever",
