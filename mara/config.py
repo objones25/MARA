@@ -60,6 +60,7 @@ class ResearchConfig(BaseSettings):
     corrective_retriever_max_tokens: int = Field(default=512, gt=0, description="Max new tokens for corrective sub-query generation per failing claim.")
     max_retrieval_candidates: int = Field(default=150, gt=0, description="Retrieval pool size; fed into reranker once implemented")
     max_claim_sources: int = Field(default=50, gt=0, description="Leaves passed to claim extraction after retrieval (and eventual reranking)")
+    max_chunks_per_url: int = Field(default=3, gt=0, description="Maximum chunks from any single source URL admitted to the claim-extraction window. Prevents high-volume commercial sources from crowding out lower-volume but relevant sources such as ArXiv papers.")
     max_extracted_claims: int = Field(default=100, gt=0, description="Maximum claims retained after extraction. Caps over-extraction from large leaf sets.")
 
     # Cryptography

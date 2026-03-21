@@ -21,11 +21,22 @@ two-stage strategy:
      Leaves absent from BM25 results receive a penalty rank of len(leaves),
      keeping their BM25 contribution small but non-zero.
 
+  3. Per-URL chunk cap
+     After ranking, ``_apply_per_url_cap`` walks the ranked list and admits
+     at most ``max_chunks_per_url`` chunks from any single source URL.  This
+     prevents high-volume commercial sources (market research reports split
+     into 30+ chunks) from flooding the 50-leaf extraction window and
+     crowding out lower-volume but potentially more relevant sources such as
+     ArXiv papers.  The cap is applied identically on both the hybrid RRF
+     and pure-semantic paths so behaviour is consistent regardless of whether
+     the DB is enabled.
+
 Pure-semantic fallback
 ----------------------
 When ``leaf_repo`` is not injected (``leaf_db_enabled=False`` or the node
 is running outside the CLI), the retriever falls back to the original
-cosine-similarity-only ranking.  All existing behaviour is preserved.
+cosine-similarity-only ranking.  All existing behaviour is preserved,
+including the per-URL cap.
 
 Thread safety
 -------------
@@ -141,6 +152,47 @@ async def _load_or_compute_leaf_embeddings(
     return np.stack([valid[leaf["hash"]] for leaf in leaves])
 
 
+def _apply_per_url_cap(
+    ranked_indices: np.ndarray,
+    leaves: list[MerkleLeaf],
+    k: int,
+    max_chunks_per_url: int,
+) -> list[MerkleLeaf]:
+    """Select up to *k* leaves in ranked order, capping chunks per unique URL.
+
+    Walks *ranked_indices* in descending-score order, tracking how many
+    chunks have been selected for each URL.  A leaf is admitted only if its
+    URL has not yet reached *max_chunks_per_url*.  Selection stops when *k*
+    leaves have been chosen or the list is exhausted.
+
+    If the corpus contains fewer than *k* eligible leaves after applying the
+    cap (e.g. all leaves come from a single URL and cap < k), the returned
+    list is shorter than *k*.  Callers should log the shortfall when this
+    matters.
+
+    Args:
+        ranked_indices:    Indices into *leaves*, sorted best-first.
+        leaves:            Full MerkleLeaf list (same order as embeddings).
+        k:                 Maximum leaves to return.
+        max_chunks_per_url: Maximum chunks admitted from any single URL.
+
+    Returns:
+        List of at most *k* MerkleLeaf dicts in ranked order.
+    """
+    url_counts: dict[str, int] = {}
+    selected: list[MerkleLeaf] = []
+    for idx in ranked_indices:
+        leaf = leaves[int(idx)]
+        url = leaf["url"]
+        count = url_counts.get(url, 0)
+        if count < max_chunks_per_url:
+            selected.append(leaf)
+            url_counts[url] = count + 1
+            if len(selected) == k:
+                break
+    return selected
+
+
 def _rrf_scores(
     leaves: list[MerkleLeaf],
     semantic_scores: np.ndarray,
@@ -244,11 +296,15 @@ async def retriever(state: MARAState, config: RunnableConfig) -> dict:
 
     # Pure-semantic fallback — DB disabled or leaf_repo not injected.
     if leaf_repo is None:
-        retrieved = [leaves[int(i)] for i in semantic_order[:k]]
+        retrieved = _apply_per_url_cap(
+            semantic_order, leaves, k, research_config.max_chunks_per_url
+        )
         _log.info(
-            "Pure semantic — top score %.3f, bottom %.3f",
+            "Pure semantic — %d/%d leaves selected (cap: %d/URL, top score %.3f)",
+            len(retrieved),
+            k,
+            research_config.max_chunks_per_url,
             float(semantic_scores[semantic_order[0]]),
-            float(semantic_scores[semantic_order[k - 1]]),
         )
         return {"retrieved_leaves": retrieved}
 
@@ -267,12 +323,15 @@ async def retriever(state: MARAState, config: RunnableConfig) -> dict:
     }
 
     rrf = _rrf_scores(leaves, semantic_scores, semantic_order, bm25_hash_rank)
-    top_indices = np.argsort(rrf)[::-1][:k]
-    retrieved = [leaves[int(i)] for i in top_indices]
+    rrf_order = np.argsort(rrf)[::-1]
+    retrieved = _apply_per_url_cap(rrf_order, leaves, k, research_config.max_chunks_per_url)
 
     _log.info(
-        "Hybrid RRF — %d BM25 hit(s), top RRF %.4f",
+        "Hybrid RRF — %d BM25 hit(s), %d/%d leaves selected (cap: %d/URL, top RRF %.4f)",
         len(bm25_results),
-        float(rrf[top_indices[0]]) if len(top_indices) else 0.0,
+        len(retrieved),
+        k,
+        research_config.max_chunks_per_url,
+        float(rrf[rrf_order[0]]) if len(rrf_order) else 0.0,
     )
     return {"retrieved_leaves": retrieved}

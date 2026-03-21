@@ -24,7 +24,7 @@ import asyncio
 import pytest
 import numpy as np
 
-from mara.agent.nodes.retriever import retriever, _load_or_compute_leaf_embeddings, _rrf_scores
+from mara.agent.nodes.retriever import retriever, _load_or_compute_leaf_embeddings, _rrf_scores, _apply_per_url_cap
 from mara.agent.state import MerkleLeaf, SubQuery
 from mara.config import ResearchConfig
 from mara.merkle.hasher import hash_chunk
@@ -61,6 +61,7 @@ def retriever_state(make_mara_state):
         query: str = "What are the effects of automation?",
         max_claim_sources: int = 3,
         embedding_model: str = "all-MiniLM-L6-v2",
+        max_chunks_per_url: int = 3,
     ):
         return make_mara_state(
             query=query,
@@ -70,6 +71,7 @@ def retriever_state(make_mara_state):
                 max_claim_sources=max_claim_sources,
                 embedding_model=embedding_model,
                 leaf_db_enabled=False,
+                max_chunks_per_url=max_chunks_per_url,
             ),
         )
     return _factory
@@ -329,7 +331,8 @@ class TestRetrieverScoring:
 
     async def test_uses_max_claim_sources_as_k(self, mocker, retriever_state):
         mocker.patch("mara.agent.nodes.retriever.embed", side_effect=_mock_embed)
-        leaves = [_make_leaf(i) for i in range(10)]
+        # Use unique URLs so the per-URL cap (default=3) does not limit below k=4.
+        leaves = [_make_leaf(i, url=f"https://source-{i}.com", text=f"text {i}") for i in range(10)]
         state = retriever_state(leaves=leaves, max_claim_sources=4)
         result = await retriever(state, config={})
         assert len(result["retrieved_leaves"]) == 4
@@ -767,3 +770,146 @@ class TestRetrieverHybrid:
             state, config={"configurable": {"leaf_repo": repo, "run_id": "r1"}}
         )
         repo.update_embeddings.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# _apply_per_url_cap — pure-function unit tests
+# ---------------------------------------------------------------------------
+
+
+class TestApplyPerUrlCap:
+    def _indices(self, n: int) -> np.ndarray:
+        """Return [0, 1, ..., n-1] as ranked_indices (identity rank)."""
+        return np.arange(n)
+
+    def test_returns_list(self):
+        leaves = [_make_leaf(i, url=f"https://a.com/{i}") for i in range(3)]
+        result = _apply_per_url_cap(self._indices(3), leaves, k=2, max_chunks_per_url=1)
+        assert isinstance(result, list)
+
+    def test_single_url_cap_one_returns_one_leaf(self):
+        """5 leaves from the same URL, cap=1, k=5 → only 1 admitted."""
+        leaves = [_make_leaf(i, url="https://a.com", text=f"text {i}") for i in range(5)]
+        result = _apply_per_url_cap(self._indices(5), leaves, k=5, max_chunks_per_url=1)
+        assert len(result) == 1
+
+    def test_single_url_cap_larger_than_k(self):
+        """Cap larger than k → k limits, not cap."""
+        leaves = [_make_leaf(i, url="https://a.com", text=f"text {i}") for i in range(5)]
+        result = _apply_per_url_cap(self._indices(5), leaves, k=2, max_chunks_per_url=10)
+        assert len(result) == 2
+
+    def test_two_urls_equal_chunks_cap_one(self):
+        """2 URLs × 3 chunks each, cap=1, k=4 → 2 selected (one per URL)."""
+        leaves = (
+            [_make_leaf(i, url="https://a.com", text=f"a{i}") for i in range(3)]
+            + [_make_leaf(i + 3, url="https://b.com", text=f"b{i}") for i in range(3)]
+        )
+        result = _apply_per_url_cap(self._indices(6), leaves, k=4, max_chunks_per_url=1)
+        assert len(result) == 2
+        urls = {leaf["url"] for leaf in result}
+        assert urls == {"https://a.com", "https://b.com"}
+
+    def test_two_urls_cap_two_fills_k(self):
+        """2 URLs × 3 chunks each, cap=2, k=4 → all 4 selected."""
+        leaves = (
+            [_make_leaf(i, url="https://a.com", text=f"a{i}") for i in range(3)]
+            + [_make_leaf(i + 3, url="https://b.com", text=f"b{i}") for i in range(3)]
+        )
+        result = _apply_per_url_cap(self._indices(6), leaves, k=4, max_chunks_per_url=2)
+        assert len(result) == 4
+
+    def test_rank_order_preserved(self):
+        """Leaves are returned in the order they appear in ranked_indices."""
+        leaves = [_make_leaf(i, url=f"https://src-{i}.com", text=f"t{i}") for i in range(4)]
+        # Reverse rank: [3, 2, 1, 0]
+        ranked = np.array([3, 2, 1, 0])
+        result = _apply_per_url_cap(ranked, leaves, k=3, max_chunks_per_url=1)
+        assert [leaf["index"] for leaf in result] == [3, 2, 1]
+
+    def test_empty_ranked_indices_returns_empty(self):
+        leaves = [_make_leaf(0)]
+        result = _apply_per_url_cap(np.array([], dtype=int), leaves, k=5, max_chunks_per_url=3)
+        assert result == []
+
+    def test_cap_equal_to_total_leaves_from_url(self):
+        """Cap exactly matches chunk count — all chunks admitted."""
+        leaves = [_make_leaf(i, url="https://a.com", text=f"t{i}") for i in range(3)]
+        result = _apply_per_url_cap(self._indices(3), leaves, k=3, max_chunks_per_url=3)
+        assert len(result) == 3
+
+    def test_cap_applies_per_url_independently(self):
+        """URL A capped at 2, URL B uncapped (1 chunk) — total 3."""
+        leaves = (
+            [_make_leaf(i, url="https://a.com", text=f"a{i}") for i in range(4)]
+            + [_make_leaf(4, url="https://b.com", text="b0")]
+        )
+        result = _apply_per_url_cap(self._indices(5), leaves, k=5, max_chunks_per_url=2)
+        a_count = sum(1 for leaf in result if leaf["url"] == "https://a.com")
+        b_count = sum(1 for leaf in result if leaf["url"] == "https://b.com")
+        assert a_count == 2
+        assert b_count == 1
+
+
+# ---------------------------------------------------------------------------
+# Per-URL cap — integration tests through the retriever node
+# ---------------------------------------------------------------------------
+
+
+class TestRetrieverPerUrlCap:
+    """Verify the cap is applied consistently on both retrieval paths."""
+
+    async def test_semantic_path_caps_same_url_leaves(self, mocker, retriever_state):
+        """Many chunks from one URL: cap=1 limits the flood; leaves from other URLs fill k."""
+        mocker.patch("mara.agent.nodes.retriever.embed", side_effect=_mock_embed)
+        # 4 chunks from URL A, 2 chunks from unique URLs — k=4, cap=1
+        flood = [_make_leaf(i, url="https://flood.com", text=f"flood {i}") for i in range(4)]
+        unique = [_make_leaf(i + 4, url=f"https://u{i}.com", text=f"unique {i}") for i in range(2)]
+        leaves = flood + unique
+        state = retriever_state(leaves=leaves, max_claim_sources=4, max_chunks_per_url=1)
+        result = await retriever(state, config={})
+        flood_count = sum(1 for l in result["retrieved_leaves"] if l["url"] == "https://flood.com")
+        assert flood_count <= 1
+
+    async def test_semantic_path_total_does_not_exceed_k(self, mocker, retriever_state):
+        mocker.patch("mara.agent.nodes.retriever.embed", side_effect=_mock_embed)
+        leaves = [_make_leaf(i, url=f"https://s{i}.com", text=f"t{i}") for i in range(10)]
+        state = retriever_state(leaves=leaves, max_claim_sources=4, max_chunks_per_url=2)
+        result = await retriever(state, config={})
+        assert len(result["retrieved_leaves"]) <= 4
+
+    async def test_hybrid_path_caps_same_url_leaves(self, mocker, retriever_state):
+        """Hybrid path applies the same per-URL cap as the semantic path."""
+        mocker.patch("mara.agent.nodes.retriever.embed", side_effect=_mock_embed)
+        flood = [_make_leaf(i, url="https://flood.com", text=f"flood {i}") for i in range(4)]
+        unique = [_make_leaf(i + 4, url=f"https://u{i}.com", text=f"unique {i}") for i in range(2)]
+        leaves = flood + unique
+
+        repo = mocker.MagicMock()
+        repo.get_embeddings_for_hashes.return_value = {leaf["hash"]: None for leaf in leaves}
+        repo.update_embeddings.return_value = None
+        repo.bm25_search.return_value = []
+
+        state = retriever_state(leaves=leaves, max_claim_sources=4, max_chunks_per_url=1)
+        result = await retriever(
+            state, config={"configurable": {"leaf_repo": repo, "run_id": "r1"}}
+        )
+        flood_count = sum(1 for l in result["retrieved_leaves"] if l["url"] == "https://flood.com")
+        assert flood_count <= 1
+
+    async def test_cap_larger_than_k_has_no_effect(self, mocker, retriever_state):
+        """When cap >= k, the cap never limits — only k applies."""
+        mocker.patch("mara.agent.nodes.retriever.embed", side_effect=_mock_embed)
+        leaves = [_make_leaf(i, url="https://a.com", text=f"t{i}") for i in range(10)]
+        state = retriever_state(leaves=leaves, max_claim_sources=2, max_chunks_per_url=100)
+        result = await retriever(state, config={})
+        assert len(result["retrieved_leaves"]) == 2
+
+    async def test_no_cap_applied_when_leaf_count_le_k(self, mocker, retriever_state):
+        """Short-circuit path (len(leaves) <= k) returns all leaves uncapped."""
+        mocker.patch("mara.agent.nodes.retriever.embed")
+        leaves = [_make_leaf(i, url="https://a.com", text=f"t{i}") for i in range(3)]
+        state = retriever_state(leaves=leaves, max_claim_sources=5, max_chunks_per_url=1)
+        result = await retriever(state, config={})
+        # All 3 returned even though cap=1 and all from same URL
+        assert len(result["retrieved_leaves"]) == 3
