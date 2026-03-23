@@ -125,8 +125,10 @@ The agent is implemented as a directed `StateGraph` in LangGraph. Control flows 
 │       ▼                                                        │
 │  [search_worker ×N] ──┐  parallel fan-out via Send()          │
 │  (brave → firecrawl)  │  one search_worker + one arxiv_worker  │
-│  [arxiv_worker  ×N] ──┘  dispatched per sub-query             │
-│       │  (arxiv_search → firecrawl)                           │
+│  [arxiv_worker  ×N] ──┤  + one s2_worker dispatched per       │
+│  [s2_worker     ×N] ──┘  sub-query (3 × max_workers total)   │
+│       │  (arxiv: arxiv_search → firecrawl)                    │
+│       │  (s2: semantic_scholar_search → raw_chunks directly)  │
 │       ▼  (fan-in via operator.add on raw_chunks)              │
 │  [Source Hasher]  →  [Merkle Builder] ◄────────────────┐      │
 │                             │                           │      │
@@ -178,23 +180,29 @@ LangSmith traces every node invocation, every LLM call, and every routing decisi
 
 ### 2. Parallel Search Workers
 
-**Role:** Execute retrieval for each sub-query simultaneously. For each sub-query, two parallel worker subgraphs are dispatched: a **web worker** (`search_worker`) and an **ArXiv worker** (`arxiv_worker`). Both funnel into the same `firecrawl_scrape` node and fan their chunks back into `MARAState.raw_chunks` via `operator.add`.
+**Role:** Execute retrieval for each sub-query simultaneously. For each sub-query, three parallel worker subgraphs are dispatched: a **web worker** (`search_worker`), an **ArXiv worker** (`arxiv_worker`), and a **Semantic Scholar worker** (`semantic_scholar_worker`). All three fan their chunks back into `MARAState.raw_chunks` via `operator.add`.
 
 **`search_worker` subgraph** (`brave_search → firecrawl_scrape`):
 
 1. **`brave_search`:** Calls the Brave Search API with the sub-query and collects results from all response sections: web results, news, discussions, and FAQ. Each result carries rich metadata — title, description, `extra_snippets` (up to 5 additional page excerpts), `page_age`, and `result_type`. This full result set fans back into `MARAState.search_results` via an `operator.add` reducer, making Brave's metadata available to every downstream node. Note that these results are **not hashed** — see the [Why Brave search results are not hashed](#why-brave-search-results-are-not-hashed) section for the full explanation.
-2. **`firecrawl_scrape`:** Deduplicates the URLs from `search_results` and batch-scrapes each unique URL via Firecrawl, handling JavaScript rendering and anti-bot measures. The full page markdown is split into deterministic fixed-size chunks. These chunks — not Brave's snippets — are what get passed to the Source Hasher and committed to the Merkle tree. Includes a freshness cache check: URLs already in the leaf DB within `leaf_cache_max_age_hours` are served from cache without re-scraping.
+2. **`firecrawl_scrape`:** Deduplicates the URLs from `search_results` and batch-scrapes each unique URL via Firecrawl, handling JavaScript rendering and anti-bot measures. The full page markdown is split into deterministic fixed-size chunks. These chunks — not Brave's snippets — are what get passed to the Source Hasher and committed to the Merkle tree. Includes a freshness cache check: URLs already in the leaf DB within their TTL are served from cache without re-scraping (see [Freshness cache](#freshness-cache)).
 
 **`arxiv_worker` subgraph** (`arxiv_search → firecrawl_scrape`):
 
 1. **`arxiv_search`:** Queries the ArXiv API (`export.arxiv.org/api/query`) with the sub-query and returns up to `arxiv_max_results` papers (default: 5) ranked by relevance. Uses the versioned PDF URL (e.g. `/pdf/2405.01234v2`) as the canonical source URL — versioned PDFs are immutable and satisfy the Merkle reproducibility requirement. The paper abstract is stored in `SearchResult.description` for HITL observability but is **never hashed** (only the full PDF text is committed to the tree).
-2. **`firecrawl_scrape`:** Reuses the same scrape node as the web worker. Firecrawl fetches the full PDF text and splits it into chunks identical to how web pages are handled. This means ArXiv papers receive exactly the same Merkle treatment as any other source — full text committed, hash verifiable.
+2. **`firecrawl_scrape`:** Reuses the same scrape node as the web worker. Firecrawl fetches the full PDF text and splits it into chunks identical to how web pages are handled. This means ArXiv papers receive exactly the same Merkle treatment as any other source — full text committed, hash verifiable. Versioned ArXiv PDFs use `float('inf')` TTL — see [Freshness cache](#freshness-cache).
+
+**`semantic_scholar_worker` subgraph** (`semantic_scholar_search`):
+
+1. **`semantic_scholar_search`:** Calls the Semantic Scholar `/snippet/search` endpoint and converts each result directly to a `SourceChunk`. No Firecrawl scraping step is needed — the API returns ~500-word text excerpts drawn from paper titles, abstracts, and body text, already chunked to a size suitable for embedding and retrieval. Returns up to `semantic_scholar_max_results` (default: 5) snippets per sub-query. Each chunk uses `https://www.semanticscholar.org/paper/CorpusId:{id}` as its canonical URL — a stable, resolvable identifier.
+
+   Set `S2_API_KEY` in your `.env` to avoid shared rate limits. Without a key the endpoint is accessible but subject to lower throughput. The node enforces ≤ 1 RPS across all concurrent sub-query workers via an `asyncio.Lock`-based rate limiter (`_acquire_s2_slot()`), honouring the Semantic Scholar per-key limit. HTTP errors are handled gracefully: 401/403 are logged at ERROR with a key check reminder; 429 and other transient failures are logged at WARNING and return empty chunks rather than crashing the pipeline.
 
 A citation graph traversal strategy — crawling reference links discovered during scraping — is planned but not yet implemented. See `agent/nodes/search_worker/graph.py`.
 
 **Why run them in parallel?** LLM-based agents spend most of their wall-clock time waiting on I/O — search APIs, scrape requests, LLM inference. Running multiple sub-queries simultaneously collapses this latency dramatically.
 
-**LangGraph pattern used — the `Send` API:** LangGraph's `Send` API enables fan-out by dispatching one `Send` object per sub-query per worker type. Each sub-query produces two `Send` objects — one for `search_worker` and one for `arxiv_worker` — giving `2 × max_workers` concurrent workers per run.
+**LangGraph pattern used — the `Send` API:** LangGraph's `Send` API enables fan-out by dispatching one `Send` object per sub-query per worker type. Each sub-query produces three `Send` objects — one for each worker type — giving `3 × max_workers` concurrent workers per run.
 
 ```python
 # agent/edges/routing.py
@@ -205,10 +213,11 @@ def dispatch_search_workers(state: MARAState) -> list[Send]:
                    "search_results": [], "raw_chunks": []}
         sends.append(Send("search_worker", payload))
         sends.append(Send("arxiv_worker", payload))
+        sends.append(Send("semantic_scholar_worker", payload))
     return sends
 
 builder.add_conditional_edges("query_planner", dispatch_search_workers,
-                              ["search_worker", "arxiv_worker"])
+                              ["search_worker", "arxiv_worker", "semantic_scholar_worker"])
 ```
 
 **Subgraph checkpointing:** Each worker subgraph is compiled with `checkpointer=True`, inheriting the parent checkpointer. If a scrape request times out mid-retrieval, LangGraph resumes the worker from `firecrawl_scrape` rather than re-running `brave_search` from scratch.
@@ -529,16 +538,27 @@ The database is implemented as a repository pattern (`mara/db/`). The `LeafRepos
 
 ### Freshness cache
 
-Before calling the Firecrawl API, `firecrawl_scrape` checks the database for existing leaves for each URL. If fresh leaves are found (within `leaf_cache_max_age_hours`, default: 7 days), the scrape is skipped and the cached chunks are used directly. This prevents burning scrape credits on unchanged pages and significantly reduces per-run latency after the first session.
+Before calling the Firecrawl API, `firecrawl_scrape` checks the database for each URL using a **source-type-aware TTL**. The TTL is computed by `url_ttl_hours(url, default)` in `agent/nodes/search_worker/url_ttl.py`, which classifies URLs into four tiers:
+
+| Tier | TTL | Applies to |
+|---|---|---|
+| Immutable | `float('inf')` | Versioned ArXiv PDFs (`/abs/XXXXvN`, `/pdf/XXXXvN`), DOI-resolved URLs (`doi.org/10.…`) |
+| Long-lived | 8 760 h (1 year) | Direct `.pdf` links; major publisher domains: `nature.com`, `science.org`, `cell.com`, `ncbi.nlm.nih.gov`, `pubmed.ncbi`, `nejm.org`, `thelancet.com`, `jamanetwork.com` |
+| Semi-stable | 720 h (30 days) | Wikipedia, `semanticscholar.org`, `researchgate.net` |
+| Default | 336 h (14 days) | Everything else (controlled by `leaf_cache_max_age_hours`) |
+
+The `float('inf')` sentinel is understood by `SQLiteLeafRepository.get_fresh_leaves_for_url`: when TTL is infinite the cutoff comparison is skipped entirely and any cached leaves for the URL are returned unconditionally. Versioned ArXiv PDFs and DOI pages are frozen by design — they never need to be re-scraped.
 
 ```python
 # firecrawl_scrape.py (simplified)
-fresh = leaf_repo.get_fresh_leaves_for_url(url, config.leaf_cache_max_age_hours)
-if fresh:
-    # Use cached chunks, skip Firecrawl entirely for this URL
-    cached_chunks.extend(fresh)
-else:
-    urls_to_scrape.append(url)
+for url in urls:
+    ttl = url_ttl_hours(url, research_config.leaf_cache_max_age_hours)
+    fresh = leaf_repo.get_fresh_leaves_for_url(url, ttl)
+    if fresh:
+        # Use cached chunks, skip Firecrawl entirely for this URL
+        cached_chunks.extend(fresh)
+    else:
+        urls_to_scrape.append(url)
 ```
 
 ### Cross-session corpus growth
@@ -581,12 +601,13 @@ This is the default in CI and unit tests, and requires no code changes — only 
 
 ### Current approach
 
-MARA's retrieval pipeline runs two sequential steps per sub-query, implemented as distinct nodes inside the search worker subgraph:
+MARA runs three parallel search pipelines per sub-query:
 
-1. **`brave_search` (Brave Search API):** Returns ranked result URLs for the sub-query. Brave operates an independent crawl index rather than repackaging Google/Bing results, which reduces SEO-optimised noise in research contexts.
-2. **`firecrawl_scrape` (Firecrawl):** Fetches the full page text for each URL. Firecrawl handles JavaScript-rendered pages and anti-bot measures, returning clean markdown. This full text is chunked and hashed — not a snippet controlled by the search provider.
+1. **Web pipeline** (`brave_search → firecrawl_scrape`): Brave Search returns ranked URLs from its independent crawl index; Firecrawl fetches and chunks the full page text. Brave's snippets are not hashed — see [Why Brave search results are not hashed](#why-brave-search-results-are-not-hashed).
+2. **ArXiv pipeline** (`arxiv_search → firecrawl_scrape`): The ArXiv API returns versioned PDF URLs; Firecrawl fetches and chunks the full PDF text. Versioned ArXiv PDFs have `float('inf')` TTL and are never re-scraped after the first fetch.
+3. **Semantic Scholar pipeline** (`semantic_scholar_search`): The Semantic Scholar `/snippet/search` endpoint returns ~500-word body-text excerpts directly — no scraping required. Snippets are converted to `SourceChunk` objects in place and committed to the Merkle tree like any other source.
 
-Separating search and scraping into distinct nodes means their failure modes, retry logic, and LangSmith traces are independent. Swapping out either provider does not touch the other node.
+Separating search and scraping into distinct nodes means their failure modes, retry logic, and LangSmith traces are independent. Swapping out any provider does not touch the other nodes.
 
 ### Why Brave search results are not hashed
 
@@ -653,6 +674,8 @@ Before scoring, an LLM extraction step converts raw retrieved text into a struct
 - Stored with its original sentence span for attribution
 
 Atomic claim extraction is important because compound statements (e.g., _"Study X found Y, and also concluded Z"_) can have mixed support — Y might be well-supported but Z might not. Treating them as one claim would average away a real signal.
+
+**Resilience against connection errors:** LLM inference providers occasionally drop large requests mid-response (`RemoteProtocolError`). The claim extractor catches `httpx.HTTPError` and retries with a halved leaf window, repeating until the call succeeds or the window would fall below `claim_extractor_min_leaves` (default: 10). This prevents a single flaky inference call from crashing the entire pipeline.
 
 ---
 
@@ -850,6 +873,7 @@ The verifier:
 BRAVE_API_KEY=...
 FIRECRAWL_API_KEY=...
 HF_TOKEN=...                    # HuggingFace Hub token (model downloads + inference)
+S2_API_KEY=...                  # Semantic Scholar API key — optional but recommended
 
 MARA_MODEL=Qwen/Qwen3-30B-A3B-Instruct-2507
 MARA_HF_PROVIDER=featherless-ai
@@ -862,8 +886,10 @@ MARA_HIGH_CONFIDENCE_THRESHOLD=0.80
 | `hf_provider`                  | `featherless-ai`                   | HuggingFace Inference Provider (`featherless-ai`, `groq`, `novita`, `auto`)                          |
 | `embedding_model`              | `all-MiniLM-L6-v2`                 | `sentence-transformers` model for retrieval and confidence scoring                                       |
 | `max_sources`                  | `20`                               | Brave results requested per sub-query (Brave API cap: 20/request)                                    |
-| `max_workers`                  | `3`                                | Number of parallel sub-queries (each spawns one web + one ArXiv worker)                              |
+| `max_workers`                  | `3`                                | Number of parallel sub-queries (each spawns one web + one ArXiv + one S2 worker)                    |
 | `arxiv_max_results`            | `5`                                | ArXiv papers fetched per sub-query                                                                   |
+| `semantic_scholar_max_results` | `5`                                | Semantic Scholar snippets fetched per sub-query                                                      |
+| `semantic_scholar_api_key`     | `""` (`S2_API_KEY`)                | Semantic Scholar API key. Optional but recommended — avoids shared rate limits under concurrent load |
 | `brave_freshness`              | `""`                               | Optional freshness filter: `pd` (24h), `pw` (7d), `pm` (31d), `py` (1y), or `YYYY-MM-DDtoYYYY-MM-DD` |
 | `max_retrieval_candidates`     | `150`                              | Retrieval pool size; reserve for future reranking stage                                              |
 | `max_claim_sources`            | `50`                               | Leaves passed to claim extraction after retrieval (≤ candidates)                                     |
@@ -877,6 +903,7 @@ MARA_HIGH_CONFIDENCE_THRESHOLD=0.80
 | `similarity_support_threshold` | `0.60`                             | Cosine similarity (exclusive) for a leaf to count as corroborating a claim                          |
 | `query_planner_max_tokens`     | `1024`                             | Max new tokens for the query planner LLM call                                                        |
 | `claim_extractor_max_tokens`   | `16384`                            | Max new tokens for the claim extractor LLM call                                                      |
+| `claim_extractor_min_leaves`   | `10`                               | Minimum leaf window for claim extraction retries; halving stops here and returns empty claims         |
 | `report_synthesizer_max_tokens`| `8192`                             | Max new tokens for the report synthesizer LLM call                                                   |
 | `corrective_retriever_max_tokens` | `512`                           | Max new tokens for corrective sub-query generation per failing claim                                 |
 | `hash_algorithm`               | `sha256`                           | Hash function for Merkle leaves (extensible)                                                         |
@@ -884,7 +911,7 @@ MARA_HIGH_CONFIDENCE_THRESHOLD=0.80
 | `chunk_overlap`                | `200`                              | Character overlap between consecutive chunks                                                         |
 | `checkpointer`                 | `memory`                           | `memory` or `postgres`                                                                               |
 | `leaf_db_path`                 | `~/.mara/leaves.db`                | Path to the SQLite leaf database (tilde-expanded at open time)                                       |
-| `leaf_cache_max_age_hours`     | `168.0` (7 days)                   | How long a scraped URL's leaves are considered fresh                                                 |
+| `leaf_cache_max_age_hours`     | `336.0` (14 days)                  | Default TTL for URLs that don't match a specific tier. Immutable URLs use `float('inf')`; academic publishers use 1 year; Wikipedia/S2/ResearchGate use 30 days. See [Freshness cache](#freshness-cache). |
 | `leaf_db_enabled`              | `True`                             | Set to `False` to disable all DB reads/writes (CI / unit tests)                                      |
 
 ---
@@ -900,10 +927,12 @@ mara/
 │   ├── nodes/
 │   │   ├── query_planner.py      # Sub-query decomposition node
 │   │   ├── search_worker/        # Retrieval subgraphs (per sub-query, dispatched via Send)
-│   │   │   ├── graph.py          #   Builds search_worker (brave→firecrawl) and arxiv_worker (arxiv→firecrawl)
+│   │   │   ├── graph.py          #   Builds search_worker, arxiv_worker, and semantic_scholar_worker subgraphs
 │   │   │   ├── brave_search.py   #   Brave Search API → ranked URLs + metadata
 │   │   │   ├── arxiv_search.py   #   ArXiv API → versioned PDF URLs + abstracts
-│   │   │   └── firecrawl_scrape.py #   Firecrawl scrape → full page/PDF text → chunks (+ freshness cache)
+│   │   │   ├── firecrawl_scrape.py #   Firecrawl scrape → full page/PDF text → chunks (+ per-URL TTL cache)
+│   │   │   ├── semantic_scholar_search.py # S2 /snippet/search → SourceChunks directly (no scrape needed)
+│   │   │   └── url_ttl.py        #   url_ttl_hours(): source-type TTL classifier (immutable/1yr/30d/default)
 │   │   ├── source_hasher.py      # SHA-256 hash of each chunk; builds and persists Merkle leaves
 │   │   ├── merkle_builder.py     # Assembles MerkleTree from leaf hashes
 │   │   ├── retriever.py          # Hybrid BM25+semantic RRF retrieval: all leaves → top-K
@@ -947,7 +976,7 @@ tests/
 ├── test_report_store.py              # Report save/load round-trip
 ├── test_verifier.py                  # Merkle integrity verification
 ├── db/
-│   └── test_sqlite_repository.py     # All 56 repository tests use in-memory SQLite (:memory:)
+│   └── test_sqlite_repository.py     # Repository tests (in-memory SQLite); includes float('inf') TTL cases
 ├── merkle/
 │   ├── test_hasher.py                # canonical_serialise determinism; hash stability
 │   ├── test_tree.py                  # Tree construction, odd-leaf duplication, root hash
@@ -974,6 +1003,8 @@ tests/
 │   │   └── search_worker/
 │   │       ├── test_brave_search.py  # Brave API calls with mocked httpx client
 │   │       ├── test_firecrawl_scrape.py # Firecrawl scrape with mocked client; cache hit/miss
+│   │       ├── test_semantic_scholar_search.py # S2 snippet search; rate limiter; error handling
+│   │       ├── test_url_ttl.py       # url_ttl_hours() classification across all tiers and edge cases
 │   │       └── test_graph.py         # Search worker subgraph topology
 │   └── edges/
 │       └── test_routing.py           # dispatch_search_workers, route_after_scoring
@@ -1167,6 +1198,7 @@ Create a `.env` file in the project root:
 BRAVE_API_KEY=your_brave_key
 FIRECRAWL_API_KEY=your_firecrawl_key
 HF_TOKEN=your_huggingface_token      # used for model downloads and inference
+S2_API_KEY=your_semantic_scholar_key # optional — raises S2 rate limit from shared to per-key
 
 # Optional overrides (shown with defaults)
 MARA_MODEL=Qwen/Qwen3-30B-A3B-Instruct-2507
@@ -1174,6 +1206,7 @@ MARA_HF_PROVIDER=featherless-ai
 MARA_EMBEDDING_MODEL=all-MiniLM-L6-v2
 MARA_MAX_WORKERS=3
 MARA_ARXIV_MAX_RESULTS=5
+MARA_SEMANTIC_SCHOLAR_MAX_RESULTS=5
 MARA_HIGH_CONFIDENCE_THRESHOLD=0.80
 MARA_LOW_CONFIDENCE_THRESHOLD=0.55
 MARA_MAX_CLAIM_SOURCES=50
@@ -1183,7 +1216,7 @@ MARA_N_LEAVES_CONTESTED_THRESHOLD=15
 
 # Leaf database (set to false to run without SQLite)
 MARA_LEAF_DB_PATH=~/.mara/leaves.db
-MARA_LEAF_CACHE_MAX_AGE_HOURS=168
+MARA_LEAF_CACHE_MAX_AGE_HOURS=336    # default TTL; immutable/academic/semi-stable URLs use longer tiers
 MARA_LEAF_DB_ENABLED=true
 ```
 
