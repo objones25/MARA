@@ -31,11 +31,16 @@ API key:
   to pass it in the x-api-key header for higher throughput.
 
 Rate limits:
-  This node fires once per sub-query concurrently with search_worker and
-  arxiv_worker.  Set an API key for production use to avoid rate-limit errors
-  under concurrent load.
+  S2 allows 1 RPS cumulative across all endpoints per API key.  MARA fires
+  one S2 request per sub-query concurrently (up to max_workers at a time),
+  so without throttling multiple requests would land simultaneously.
+  _acquire_s2_slot() serialises all callers behind an asyncio.Lock and
+  sleeps for the remainder of the 1-second window opened by the previous
+  call before recording a new timestamp and releasing the lock.
 """
 
+import asyncio
+import time
 from datetime import datetime, timezone
 
 import httpx
@@ -48,6 +53,29 @@ _log = get_logger(__name__)
 
 _S2_SNIPPET_URL = "https://api.semanticscholar.org/graph/v1/snippet/search"
 _S2_FIELDS = "snippet.text,snippet.section,snippet.snippetKind"
+
+# Rate limiting — S2 enforces 1 RPS cumulative across all endpoints per key.
+_S2_MIN_INTERVAL: float = 1.0  # seconds
+_S2_RATE_LOCK = asyncio.Lock()
+_s2_last_call_time: float = float("-inf")  # monotonic; -inf → no sleep on first call
+
+
+async def _acquire_s2_slot() -> None:
+    """Block until it is safe to fire the next S2 request (≤ 1 RPS).
+
+    Serialises concurrent callers behind _S2_RATE_LOCK.  Each caller sleeps
+    for the remainder of the 1-second window opened by the previous call,
+    then records its own timestamp before releasing the lock.  The HTTP
+    request is made *after* the lock is released so the network round-trip
+    does not extend the inter-request gap beyond the minimum.
+    """
+    global _s2_last_call_time
+    async with _S2_RATE_LOCK:
+        now = time.monotonic()
+        wait = _S2_MIN_INTERVAL - (now - _s2_last_call_time)
+        if wait > 0:
+            await asyncio.sleep(wait)
+        _s2_last_call_time = time.monotonic()
 
 
 async def semantic_scholar_search(state: SearchWorkerState, config: RunnableConfig) -> dict:
@@ -80,6 +108,8 @@ async def semantic_scholar_search(state: SearchWorkerState, config: RunnableConf
 
     retrieved_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
+    await _acquire_s2_slot()
+
     try:
         async with httpx.AsyncClient() as client:
             response = await client.get(
@@ -90,10 +120,30 @@ async def semantic_scholar_search(state: SearchWorkerState, config: RunnableConf
             )
             response.raise_for_status()
             data = response.json()
-    except (httpx.TimeoutException, httpx.HTTPStatusError, httpx.HTTPError) as exc:
-        _log.warning(
-            "Semantic Scholar request failed for %r: %s — returning no chunks", query, exc
-        )
+    except httpx.HTTPStatusError as exc:
+        status = exc.response.status_code
+        if status in (401, 403):
+            _log.error(
+                "Semantic Scholar authentication failure (%d) for %r — check S2_API_KEY",
+                status,
+                query,
+            )
+        elif status == 429:
+            _log.warning(
+                "Semantic Scholar rate limit exceeded (%d) for %r — returning no chunks",
+                status,
+                query,
+            )
+        else:
+            _log.warning(
+                "Semantic Scholar HTTP %d for %r — returning no chunks", status, query
+            )
+        return {"raw_chunks": []}
+    except httpx.TimeoutException as exc:
+        _log.warning("Semantic Scholar request timed out for %r: %s — returning no chunks", query, exc)
+        return {"raw_chunks": []}
+    except httpx.HTTPError as exc:
+        _log.warning("Semantic Scholar request failed for %r: %s — returning no chunks", query, exc)
         return {"raw_chunks": []}
 
     raw_chunks: list[SourceChunk] = []

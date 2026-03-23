@@ -6,14 +6,26 @@ Semantic Scholar /snippet/search endpoint and returns SourceChunks directly
 (no Firecrawl scraping required).
 """
 
+import time
+
 import pytest
 import httpx
 
+import mara.agent.nodes.search_worker.semantic_scholar_search as _s2_mod
 from mara.agent.nodes.search_worker.semantic_scholar_search import (
     semantic_scholar_search,
     _S2_SNIPPET_URL,
+    _S2_MIN_INTERVAL,
 )
 from mara.config import ResearchConfig
+
+
+@pytest.fixture(autouse=True)
+def reset_s2_rate_limiter():
+    """Reset rate-limit state before every test so no test waits for the window."""
+    _s2_mod._s2_last_call_time = float("-inf")
+    yield
+    _s2_mod._s2_last_call_time = float("-inf")
 
 
 # ---------------------------------------------------------------------------
@@ -254,3 +266,145 @@ class TestSemanticScholarSearch:
         result = await semantic_scholar_search(s2_state(), config={})
         timestamps = [c["retrieved_at"] for c in result["raw_chunks"]]
         assert timestamps[0] == timestamps[1]
+
+
+# ---------------------------------------------------------------------------
+# Error differentiation — status-code-specific branches
+# ---------------------------------------------------------------------------
+
+
+def _mock_http_status_code(mocker, status_code: int):
+    """Patch AsyncClient so raise_for_status() raises HTTPStatusError with a real status_code."""
+    mock_response = mocker.MagicMock()
+    mock_response.status_code = status_code
+    mock_resp = mocker.MagicMock()
+    mock_resp.raise_for_status.side_effect = httpx.HTTPStatusError(
+        "error", request=mocker.MagicMock(), response=mock_response
+    )
+    mock_client = mocker.AsyncMock()
+    mock_client.__aenter__ = mocker.AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = mocker.AsyncMock(return_value=None)
+    mock_client.get = mocker.AsyncMock(return_value=mock_resp)
+    mocker.patch(
+        "mara.agent.nodes.search_worker.semantic_scholar_search.httpx.AsyncClient",
+        return_value=mock_client,
+    )
+
+
+def _mock_transport_error(mocker, exc: httpx.HTTPError):
+    """Patch AsyncClient so client.get() raises a transport-level HTTPError."""
+    mock_client = mocker.AsyncMock()
+    mock_client.__aenter__ = mocker.AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = mocker.AsyncMock(return_value=None)
+    mock_client.get = mocker.AsyncMock(side_effect=exc)
+    mocker.patch(
+        "mara.agent.nodes.search_worker.semantic_scholar_search.httpx.AsyncClient",
+        return_value=mock_client,
+    )
+
+
+class TestSemanticScholarStatusErrors:
+    @pytest.mark.asyncio
+    async def test_401_returns_empty_chunks(self, mocker, s2_state):
+        _mock_http_status_code(mocker, 401)
+        result = await semantic_scholar_search(s2_state(), config={})
+        assert result == {"raw_chunks": []}
+
+    @pytest.mark.asyncio
+    async def test_403_returns_empty_chunks(self, mocker, s2_state):
+        _mock_http_status_code(mocker, 403)
+        result = await semantic_scholar_search(s2_state(), config={})
+        assert result == {"raw_chunks": []}
+
+    @pytest.mark.asyncio
+    async def test_429_returns_empty_chunks(self, mocker, s2_state):
+        _mock_http_status_code(mocker, 429)
+        result = await semantic_scholar_search(s2_state(), config={})
+        assert result == {"raw_chunks": []}
+
+    @pytest.mark.asyncio
+    async def test_500_returns_empty_chunks(self, mocker, s2_state):
+        _mock_http_status_code(mocker, 500)
+        result = await semantic_scholar_search(s2_state(), config={})
+        assert result == {"raw_chunks": []}
+
+    @pytest.mark.asyncio
+    async def test_transport_error_returns_empty_chunks(self, mocker, s2_state):
+        _mock_transport_error(mocker, httpx.RemoteProtocolError("peer closed connection"))
+        result = await semantic_scholar_search(s2_state(), config={})
+        assert result == {"raw_chunks": []}
+
+    @pytest.mark.asyncio
+    async def test_auth_failure_logs_at_error_level(self, mocker, s2_state):
+        mock_log = mocker.patch(
+            "mara.agent.nodes.search_worker.semantic_scholar_search._log"
+        )
+        _mock_http_status_code(mocker, 403)
+        await semantic_scholar_search(s2_state(), config={})
+        mock_log.error.assert_called_once()
+        mock_log.warning.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_rate_limit_logs_at_warning_level(self, mocker, s2_state):
+        mock_log = mocker.patch(
+            "mara.agent.nodes.search_worker.semantic_scholar_search._log"
+        )
+        _mock_http_status_code(mocker, 429)
+        await semantic_scholar_search(s2_state(), config={})
+        mock_log.warning.assert_called_once()
+        mock_log.error.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Rate limiting — _acquire_s2_slot behaviour
+# ---------------------------------------------------------------------------
+
+
+class TestSemanticScholarRateLimit:
+    @pytest.mark.asyncio
+    async def test_no_sleep_on_first_call(self, mocker, s2_state):
+        """First call with last_call_time=-inf must not sleep."""
+        mock_sleep = mocker.patch("asyncio.sleep")
+        _mock_http(mocker, _ONE_SNIPPET_RESPONSE)
+        await semantic_scholar_search(s2_state(), config={})
+        mock_sleep.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_no_sleep_when_interval_already_elapsed(self, mocker, s2_state):
+        """Call made >1s after the previous one must not sleep."""
+        _s2_mod._s2_last_call_time = time.monotonic() - (1.5)
+        mock_sleep = mocker.patch("asyncio.sleep")
+        _mock_http(mocker, _ONE_SNIPPET_RESPONSE)
+        await semantic_scholar_search(s2_state(), config={})
+        mock_sleep.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_sleeps_for_remaining_interval(self, mocker, s2_state):
+        """Call made 0.3s after the previous one must sleep ~0.7s."""
+        _s2_mod._s2_last_call_time = time.monotonic() - 0.3
+        mock_sleep = mocker.patch("asyncio.sleep")
+        _mock_http(mocker, _ONE_SNIPPET_RESPONSE)
+        await semantic_scholar_search(s2_state(), config={})
+        mock_sleep.assert_called_once()
+        duration = mock_sleep.call_args.args[0]
+        assert 0.5 < duration <= _S2_MIN_INTERVAL
+
+    @pytest.mark.asyncio
+    async def test_last_call_time_updated_after_slot_acquired(self, mocker, s2_state):
+        """_s2_last_call_time must be set to a recent monotonic value after each call."""
+        mocker.patch("asyncio.sleep")
+        _mock_http(mocker, _ONE_SNIPPET_RESPONSE)
+        before = time.monotonic()
+        await semantic_scholar_search(s2_state(), config={})
+        after = time.monotonic()
+        assert before <= _s2_mod._s2_last_call_time <= after
+
+    @pytest.mark.asyncio
+    async def test_rate_limiter_fires_even_on_http_error(self, mocker, s2_state):
+        """Slot must be acquired (and timestamp updated) even when the request fails."""
+        mocker.patch("asyncio.sleep")
+        _mock_http_status_code(mocker, 500)
+        before = time.monotonic()
+        await semantic_scholar_search(s2_state(), config={})
+        after = time.monotonic()
+        assert before <= _s2_mod._s2_last_call_time <= after
