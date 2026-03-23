@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 from firecrawl import Firecrawl
 from langchain_core.runnables import RunnableConfig
 
+from mara.agent.nodes.search_worker.url_ttl import url_ttl_hours
 from mara.agent.state import SourceChunk, SearchWorkerState
 from mara.logging import get_logger
 
@@ -90,9 +91,9 @@ async def firecrawl_scrape(state: SearchWorkerState, config: RunnableConfig) -> 
     urls_to_scrape: list[str] = []
 
     if leaf_repo is not None and research_config.leaf_db_enabled:
-        max_age = research_config.leaf_cache_max_age_hours
         for url in urls:
-            cached = leaf_repo.get_fresh_leaves_for_url(url, max_age)
+            ttl = url_ttl_hours(url, research_config.leaf_cache_max_age_hours)
+            cached = leaf_repo.get_fresh_leaves_for_url(url, ttl)
             if cached:
                 _log.debug("Cache hit for %s (%d chunk(s))", url, len(cached))
                 for leaf in cached:

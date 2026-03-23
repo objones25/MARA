@@ -11,6 +11,7 @@ loaded back in Python for cosine similarity.  This maps cleanly to
 ``vector(N)`` + pgvector HNSW index in a future Postgres backend.
 """
 
+import math
 import re
 import sqlite3
 from datetime import datetime, timedelta, timezone
@@ -193,18 +194,26 @@ class SQLiteLeafRepository:
         Freshness is based on the ``retrieved_at`` of the most-recent leaf
         row for this URL.  If that timestamp is within the window, ALL leaves
         for that URL sharing the same ``retrieved_at`` are returned.
-        """
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
-        cutoff_str = cutoff.strftime("%Y-%m-%dT%H:%M:%SZ")
 
+        When *max_age_hours* is ``float('inf')`` the cutoff comparison is
+        skipped entirely — any cached leaves for the URL are returned
+        unconditionally.  This is used for immutable URLs (versioned ArXiv
+        papers, DOI-resolved content) that never need to be re-scraped.
+        """
         # Find the most recent retrieved_at for this URL
         row = self._conn.execute(
             "SELECT MAX(retrieved_at) AS latest FROM leaves WHERE url = ?",
             (url,),
         ).fetchone()
 
-        if row is None or row["latest"] is None or row["latest"] < cutoff_str:
+        if row is None or row["latest"] is None:
             return []
+
+        if not math.isinf(max_age_hours):
+            cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
+            cutoff_str = cutoff.strftime("%Y-%m-%dT%H:%M:%SZ")
+            if row["latest"] < cutoff_str:
+                return []
 
         latest = row["latest"]
         rows = self._conn.execute(

@@ -281,6 +281,26 @@ class TestGetFreshLeavesForUrl:
         result = repo.get_fresh_leaves_for_url("https://example.com", 168.0)
         assert len(result) == 1
 
+    def test_inf_ttl_returns_very_old_leaves(self, repo):
+        # float('inf') means immutable — any cached leaf is returned regardless of age.
+        ancient = _past_utc(hours=100_000)
+        leaf = _make_leaf(hash_="h1", url="https://arxiv.org/abs/2301.00001v1", retrieved_at=ancient)
+        repo.upsert_leaves([leaf])
+        result = repo.get_fresh_leaves_for_url("https://arxiv.org/abs/2301.00001v1", float("inf"))
+        assert len(result) == 1
+        assert result[0]["hash"] == "h1"
+
+    def test_inf_ttl_returns_empty_for_unknown_url(self, repo):
+        result = repo.get_fresh_leaves_for_url("https://arxiv.org/abs/2301.99999v1", float("inf"))
+        assert result == []
+
+    def test_inf_ttl_does_not_affect_other_urls(self, repo):
+        # Inserting leaves for url A with inf TTL does not return them for url B.
+        leaf = _make_leaf(hash_="h1", url="https://arxiv.org/abs/2301.00001v1", retrieved_at=_now_utc())
+        repo.upsert_leaves([leaf])
+        result = repo.get_fresh_leaves_for_url("https://arxiv.org/abs/2301.99999v1", float("inf"))
+        assert result == []
+
 
 # ---------------------------------------------------------------------------
 # Retrieval — get_leaves_for_run
