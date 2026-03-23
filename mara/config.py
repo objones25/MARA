@@ -56,6 +56,7 @@ class ResearchConfig(BaseSettings):
     max_new_pages_per_round: int = Field(default=5, gt=0, description="Max new pages scraped per corrective round per sub-query")
     query_planner_max_tokens: int = Field(default=1024, gt=0, description="Max new tokens for the query planner LLM call.")
     claim_extractor_max_tokens: int = Field(default=16384, gt=0, description="Max new tokens for the claim extractor LLM call. 50 leaves can produce ~150 claims; 16384 gives comfortable headroom.")
+    claim_extractor_min_leaves: int = Field(default=10, gt=0, description="Halving floor for claim extraction retries. When a connection error causes the leaf window to be halved, extraction gives up and returns empty claims once the window would fall below this count.")
     report_synthesizer_max_tokens: int = Field(default=8192, gt=0, description="Max new tokens for the report synthesizer LLM call.")
     corrective_retriever_max_tokens: int = Field(default=512, gt=0, description="Max new tokens for corrective sub-query generation per failing claim.")
     max_retrieval_candidates: int = Field(default=150, gt=0, description="Retrieval pool size; fed into reranker once implemented")
@@ -72,7 +73,7 @@ class ResearchConfig(BaseSettings):
 
     # Leaf database
     leaf_db_path: str = Field(default="~/.mara/leaves.db", description="Path to the SQLite leaf database. Tilde-expanded at open time.")
-    leaf_cache_max_age_hours: float = Field(default=168.0, gt=0.0, description="How long a scraped URL's leaves are considered fresh (default: 7 days).")
+    leaf_cache_max_age_hours: float = Field(default=336.0, gt=0.0, description="How long a scraped URL's leaves are considered fresh for URLs that don't match a specific TTL tier (default: 14 days). Immutable URLs (versioned ArXiv, DOI) use float('inf'); academic domains use 1 year; semi-stable pages (Wikipedia, Semantic Scholar) use 30 days.")
     leaf_db_enabled: bool = Field(default=True, description="Set to False to disable all DB reads/writes (useful in tests and CI).")
 
     # ArXiv

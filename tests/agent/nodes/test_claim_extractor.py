@@ -10,6 +10,7 @@ All LLM calls are mocked. Tests cover:
 
 import json
 import pytest
+import httpx
 
 from mara.agent.nodes.claim_extractor import (
     _format_leaves,
@@ -319,3 +320,60 @@ class TestClaimExtractorNode:
         user_msg = mock_llm.ainvoke.call_args.args[0][1]["content"]
         for i in range(3):
             assert f"text {i}" in user_msg
+
+    # ------------------------------------------------------------------
+    # Halving retry on LLM connection errors
+    # ------------------------------------------------------------------
+
+    async def test_halves_window_and_retries_on_http_error(self, mocker, make_mara_state, make_merkle_leaf):
+        leaves = [make_merkle_leaf(index=i) for i in range(20)]
+        ok_response = _mock_llm_response(mocker, _claims_json())
+        mock_llm = mocker.AsyncMock()
+        mock_llm.ainvoke = mocker.AsyncMock(
+            side_effect=[httpx.RemoteProtocolError("dropped"), ok_response]
+        )
+        mocker.patch("mara.agent.nodes.claim_extractor.make_llm", return_value=mock_llm)
+        cfg = ResearchConfig(claim_extractor_min_leaves=5, leaf_db_enabled=False)
+        result = await claim_extractor(make_mara_state(retrieved_leaves=leaves, config=cfg), config={})
+        assert len(result["extracted_claims"]) == 2
+        assert mock_llm.ainvoke.call_count == 2
+
+    async def test_second_call_uses_halved_leaf_window(self, mocker, make_mara_state, make_merkle_leaf):
+        leaves = [make_merkle_leaf(index=i, text=f"leaf-text-{i}") for i in range(20)]
+        ok_response = _mock_llm_response(mocker, _claims_json())
+        mock_llm = mocker.AsyncMock()
+        mock_llm.ainvoke = mocker.AsyncMock(
+            side_effect=[httpx.RemoteProtocolError("dropped"), ok_response]
+        )
+        mocker.patch("mara.agent.nodes.claim_extractor.make_llm", return_value=mock_llm)
+        cfg = ResearchConfig(claim_extractor_min_leaves=5, leaf_db_enabled=False)
+        await claim_extractor(make_mara_state(retrieved_leaves=leaves, config=cfg), config={})
+        second_user_msg = mock_llm.ainvoke.call_args_list[1].args[0][1]["content"]
+        assert "leaf-text-9" in second_user_msg   # last of first 10 (20//2)
+        assert "leaf-text-10" not in second_user_msg  # first excluded
+
+    async def test_returns_empty_when_halving_floor_reached(self, mocker, make_mara_state, make_merkle_leaf):
+        # 20 leaves, floor=10: 20→10 (retry), 10→5 (below floor, give up)
+        leaves = [make_merkle_leaf(index=i) for i in range(20)]
+        mock_llm = mocker.AsyncMock()
+        mock_llm.ainvoke = mocker.AsyncMock(
+            side_effect=httpx.RemoteProtocolError("always fails")
+        )
+        mocker.patch("mara.agent.nodes.claim_extractor.make_llm", return_value=mock_llm)
+        cfg = ResearchConfig(claim_extractor_min_leaves=10, leaf_db_enabled=False)
+        result = await claim_extractor(make_mara_state(retrieved_leaves=leaves, config=cfg), config={})
+        assert result == {"extracted_claims": []}
+        assert mock_llm.ainvoke.call_count == 2
+
+    async def test_gives_up_immediately_when_halved_below_floor(self, mocker, make_mara_state, make_merkle_leaf):
+        # 6 leaves, floor=5: next_count=3 < 5, give up after first failure
+        leaves = [make_merkle_leaf(index=i) for i in range(6)]
+        mock_llm = mocker.AsyncMock()
+        mock_llm.ainvoke = mocker.AsyncMock(
+            side_effect=httpx.RemoteProtocolError("fails immediately")
+        )
+        mocker.patch("mara.agent.nodes.claim_extractor.make_llm", return_value=mock_llm)
+        cfg = ResearchConfig(claim_extractor_min_leaves=5, leaf_db_enabled=False)
+        result = await claim_extractor(make_mara_state(retrieved_leaves=leaves, config=cfg), config={})
+        assert result == {"extracted_claims": []}
+        assert mock_llm.ainvoke.call_count == 1

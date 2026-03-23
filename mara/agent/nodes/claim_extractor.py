@@ -28,6 +28,7 @@ Why a single LLM call over all leaves?
 
 import json
 
+import httpx
 from langchain_core.runnables import RunnableConfig
 
 from mara.agent.llm import make_llm, strip_think
@@ -153,14 +154,43 @@ async def claim_extractor(state: MARAState, config: RunnableConfig) -> dict:
     research_config = state["config"]
     llm = make_llm(research_config.model, research_config.hf_token, research_config.claim_extractor_max_tokens, research_config.hf_provider, research_config.temperature, research_config.top_p, research_config.top_k, research_config.presence_penalty)
 
-    passages = _format_leaves(leaves)
-    messages = [
-        {"role": "system", "content": build_system_prompt(state["run_date"], research_config.max_extracted_claims)},
-        {"role": "user", "content": build_user_message(passages, research_config.max_extracted_claims)},
-    ]
+    system_prompt = build_system_prompt(state["run_date"], research_config.max_extracted_claims)
+    window = leaves
 
-    response = await llm.ainvoke(messages, config)
+    while True:
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": build_user_message(_format_leaves(window), research_config.max_extracted_claims)},
+        ]
+        try:
+            response = await llm.ainvoke(messages, config)
+            break
+        except httpx.HTTPError as exc:
+            next_count = len(window) // 2
+            if next_count < research_config.claim_extractor_min_leaves:
+                _log.error(
+                    "Claim extraction failed with %d leaves; halving floor (%d) reached: %s"
+                    " — returning empty claims",
+                    len(window),
+                    research_config.claim_extractor_min_leaves,
+                    exc,
+                )
+                return {"extracted_claims": []}
+            _log.warning(
+                "LLM connection error with %d leaves: %s — retrying with %d",
+                len(window),
+                exc,
+                next_count,
+            )
+            window = window[:next_count]
+
+    if len(window) < len(leaves):
+        _log.warning(
+            "Claim extraction succeeded with %d/%d leaves after connection errors",
+            len(window),
+            len(leaves),
+        )
+
     claims = _parse_claims(response.content)
-
-    _log.info("Extracted %d claim(s) from %d leaf/leaves", len(claims), len(leaves))
+    _log.info("Extracted %d claim(s) from %d leaf/leaves", len(claims), len(window))
     return {"extracted_claims": claims}
